@@ -1,4 +1,4 @@
-module github.com/jfrog/jfrog-cli-plugin-template
+module github.com/jmhardison/jfrog-vulnreport
 
 go 1.22.4
 

@@ -8,7 +8,7 @@ tmp
 out
 
 # Template executable
-jfrog-cli-plugin-template
+jfrog-vulnreport
 
 # Vim
 *~
