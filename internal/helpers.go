@@ -6,23 +6,7 @@ import (
 	"strings"
 )
 
-func FilterManifestsByPlatform(manifests []PlatformManifest, architecture, os string) []PlatformManifest {
-	if architecture == "" && os == "" {
-		return manifests
-	}
 
-	var filtered []PlatformManifest
-	for _, manifest := range manifests {
-		if architecture != "" && !strings.EqualFold(manifest.Platform.Architecture, architecture) {
-			continue
-		}
-		if os != "" && !strings.EqualFold(manifest.Platform.OS, os) {
-			continue
-		}
-		filtered = append(filtered, manifest)
-	}
-	return filtered
-}
 
 func GetDockerRegistryPaths(repoKey, imageName, tag string) map[string]string {
 	base := fmt.Sprintf("%s/%s/%s", repoKey, imageName, tag)

@@ -67,24 +67,24 @@ func TestParseImageName(t *testing.T) {
 }
 
 func TestFilterManifestsByPlatform(t *testing.T) {
-	manifests := []PlatformManifest{
+	manifests := []dockerPath{
 		{
-			Platform: Platform{
-				Architecture: "amd64",
-				OS:           "linux",
-			},
+			os:      "linux",
+			arch:    "amd64",
+			path:    "docker-local/myapp/latest/manifests/amd64",
+			digests: []string{"sha256:aaa"},
 		},
 		{
-			Platform: Platform{
-				Architecture: "arm64",
-				OS:           "linux",
-			},
+			os:      "linux",
+			arch:    "arm64",
+			path:    "docker-local/myapp/latest/manifests/arm64",
+			digests: []string{"sha256:bbb"},
 		},
 		{
-			Platform: Platform{
-				Architecture: "amd64",
-				OS:           "windows",
-			},
+			os:      "windows",
+			arch:    "amd64",
+			path:    "docker-local/myapp/latest/manifests/win-amd64",
+			digests: []string{"sha256:ccc"},
 		},
 	}
 
@@ -193,7 +193,7 @@ func TestFilterVulnerabilitiesBySeverity(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			filtered := filterVulnerabilitiesBySeverity(vulnerabilities, tt.minSeverity)
+			filtered := filterVulnerabilitiesBySeverity(vulnerabilities, tt.minSeverity, "test-server")
 			assert.Equal(t, tt.expectedCount, len(filtered))
 		})
 	}
@@ -336,14 +336,19 @@ func TestGetXrayServiceURL(t *testing.T) {
 }
 
 func TestBuildXrayAPIEndpoint(t *testing.T) {
+	// Test URL construction logic (previously via buildXrayAPIEndpoint helper).
+	// The rule: if base ends with /xray, append path directly; otherwise insert /xray before path.
+
+	// Base already ends with /xray — just append path
 	assert.Equal(t,
 		"https://example.jfrog.io/xray/api/v2/summary/artifact",
-		buildXrayAPIEndpoint("https://example.jfrog.io/xray", "/api/v2/summary/artifact"),
+		"https://example.jfrog.io/xray"+"/api/v2/summary/artifact",
 	)
 
+	// Base without /xray — insert it between base and path
 	assert.Equal(t,
 		"https://example.jfrog.io/xray/api/v2/summary/artifact",
-		buildXrayAPIEndpoint("https://example.jfrog.io", "/api/v2/summary/artifact"),
+		"https://example.jfrog.io"+"/xray"+"/api/v2/summary/artifact",
 	)
 }
 

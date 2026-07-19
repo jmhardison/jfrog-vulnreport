@@ -73,6 +73,10 @@ func getCheckFlags() []components.Flag {
 			"docker-registry-url",
 			"Docker registry URL (e.g., https://company-docker-local.jfrog.io). If not specified, will be constructed from JFROG_URL.",
 		),
+		components.NewStringFlag(
+			"project-key",
+			"Xray project key for violation queries. Defaults to 'default' if not specified.",
+		),
 	}
 }
 

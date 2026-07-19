@@ -4,8 +4,6 @@ package internal
 import (
 	"encoding/json"
 	"fmt"
-	"net/http"
-	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -17,8 +15,6 @@ import (
 	artifactoryAuth "github.com/jfrog/jfrog-client-go/artifactory/auth"
 	clientconfig "github.com/jfrog/jfrog-client-go/config"
 	"github.com/jfrog/jfrog-client-go/utils/log"
-	"github.com/jfrog/jfrog-client-go/xray"
-	xrayAuth "github.com/jfrog/jfrog-client-go/xray/auth"
 	"github.com/jfrog/jfrog-client-go/xray/services"
 )
 
@@ -55,6 +51,12 @@ func RunCheckCommand(c *components.Context) error {
 		ShowFindings:      c.GetBoolFlagValue("show-findings"),
 		DebugPaths:        c.GetBoolFlagValue("debug-paths"),
 		DockerRegistryURL: c.GetStringFlagValue("docker-registry-url"),
+		ProjectKey:        c.GetStringFlagValue("project-key"),
+	}
+
+	// Default project key to "default" if not specified
+	if conf.ProjectKey == "" {
+		conf.ProjectKey = "default"
 	}
 
 	// Configure log level based on output format
@@ -85,25 +87,14 @@ func RunCheckCommand(c *components.Context) error {
 		return fmt.Errorf("failed to setup Artifactory connection: %w", err)
 	}
 
-	xrManager, err := setupXray(serverDetails)
-	if err != nil {
-		return fmt.Errorf("failed to setup Xray connection: %w", err)
-	}
-
-	// Create Docker Registry client for manifest retrieval
-	dockerClient, err := createDockerRegistryClient(conf, serverDetails)
-	if err != nil {
-		return fmt.Errorf("failed to create Docker registry client: %w", err)
-	}
-
-	// Generate vulnerability report
-	report, err := generateVulnerabilityReport(conf, rtManager, xrManager, dockerClient, repoKey, imageName, tag)
+	// Generate vulnerability report (all Xray queries use CLI wrappers in internal/xray_cli.go)
+	report, err := generateVulnerabilityReport(conf, rtManager, repoKey, imageName, tag)
 	if err != nil {
 		return fmt.Errorf("failed to generate vulnerability report: %w", err)
 	}
 
 	// Output the report
-	if err := outputReport(xrManager, report, conf.Output, conf.MinSeverity, conf.ShowFindings); err != nil {
+	if err := outputReport(conf.ServerId, report, conf.Output, conf.MinSeverity, conf.ShowFindings); err != nil {
 		return fmt.Errorf("failed to output report: %w", err)
 	}
 
@@ -145,59 +136,27 @@ func extractIssueType(vuln services.Vulnerability) string {
 	return "Security" // Default
 }
 
-// checkMaliciousPackage queries the JFrog Events API to check if an issue is malicious
-func checkMaliciousPackage(xrManager *xray.XrayServicesManager, issueId string) (bool, error) {
+// checkMaliciousPackage queries the JFrog Events API to check if an issue is malicious.
+// Always uses CLI-based approach since direct SDK access fails due to JWT audience restrictions.
+func checkMaliciousPackage(serverId string, issueId string) (bool, error) {
 	if issueId == "" {
 		return false, nil
 	}
 
-	// Build the Events API endpoint URL
-	xrayDetails := xrManager.Config().GetServiceDetails()
-	eventsEndpoint := buildXrayAPIEndpoint(xrayDetails.GetUrl(), fmt.Sprintf("/api/v2/events/%s", url.PathEscape(issueId)))
-
-	log.Debug(fmt.Sprintf("Making Events API request for %s", issueId))
-
-	// Create HTTP request
-	httpClientDetails := xrayDetails.CreateHttpClientDetails()
-	client := xrManager.Client()
-
-	// Make GET request to Events API
-	resp, body, _, err := client.SendGet(eventsEndpoint, true, &httpClientDetails)
+	isMalicious, err := checkMaliciousPackageCLI(serverId, issueId)
 	if err != nil {
-		log.Debug(fmt.Sprintf("Failed to query Events API for %s: %v", issueId, err))
+		log.Debug(fmt.Sprintf("CLI Events API failed for %s: %v", issueId, err))
 		return false, err
 	}
 
-	if resp.StatusCode == 404 {
-		log.Debug(fmt.Sprintf("Issue %s not found in Events API (404) - not malicious", issueId))
-		return false, nil
-	}
-
-	if resp.StatusCode != 200 {
-		log.Debug(fmt.Sprintf("Events API returned status %d for %s", resp.StatusCode, issueId))
-		return false, fmt.Errorf("events API returned status %d", resp.StatusCode)
-	}
-
-	log.Debug(fmt.Sprintf("Events API success (200) for %s", issueId))
-
-	isMalicious, foundField, err := parseMaliciousPackageFromEventsResponse(body)
-	if err != nil {
-		log.Warn(fmt.Sprintf("Failed to parse Events API response for %s: %v", issueId, err))
-		return false, err
-	}
-	if !foundField {
-		log.Debug(fmt.Sprintf("Events API response for %s does not include malicious_package", issueId))
-		return false, nil
-	}
-	log.Debug(fmt.Sprintf("Issue %s malicious_package field: %t", issueId, isMalicious))
 	return isMalicious, nil
 }
 
-// isMaliciousWithCache checks if an issue is malicious using Events API with caching
+// isMaliciousWithCache checks if an issue is malicious using Events API with caching.
 var maliciousCache = make(map[string]bool)
 var maliciousCacheMutex sync.RWMutex
 
-func isMaliciousWithCache(xrManager *xray.XrayServicesManager, issueId string) bool {
+func isMaliciousWithCache(serverId string, issueId string) bool {
 	if issueId == "" {
 		return false
 	}
@@ -210,8 +169,7 @@ func isMaliciousWithCache(xrManager *xray.XrayServicesManager, issueId string) b
 	}
 	maliciousCacheMutex.RUnlock()
 
-	// Query Events API
-	isMalicious, err := checkMaliciousPackage(xrManager, issueId)
+	isMalicious, err := checkMaliciousPackage(serverId, issueId)
 	if err != nil {
 		log.Debug(fmt.Sprintf("Events API error for %s: %v", issueId, err))
 		return false
@@ -253,97 +211,58 @@ func min(a, b int) int {
 	return b
 }
 
-func getArtifactSummaryVulnerabilities(xrManager *xray.XrayServicesManager, artifactPath, sha256 string) ([]services.Vulnerability, error) {
-	log.Info(fmt.Sprintf("Querying Xray summary for path: %s", artifactPath))
 
-	summaryService := services.NewSummaryService(xrManager.Client())
-	xrayDetails := xrManager.Config().GetServiceDetails()
-	summaryService.XrayDetails = xrayDetails
 
-	params := services.ArtifactSummaryParams{
-		Paths: []string{artifactPath},
-	}
+// getArtifactSummaryVulnerabilitiesCLI queries Xray Violations API using JFrog CLI subprocess to bypass JWT audience restrictions.
+// Replaced SummaryService (/api/v1/summary/artifact) which hangs indefinitely for Docker images with Violations API (/api/v1/violations).
+func getArtifactSummaryVulnerabilitiesCLI(serverId, projectKey, artifactPath string) ([]services.Vulnerability, error) {
+	log.Info(fmt.Sprintf("Querying Xray Violations API via CLI for path: %s (project: %s)", artifactPath, projectKey))
 
-	if sha256 != "" {
-		params.Checksums = []string{sha256}
-		log.Info(fmt.Sprintf("Including checksum: %s", sha256))
-	}
-
-	log.Info(fmt.Sprintf("Making Xray SDK summary call to: %s", xrayDetails.GetUrl()))
-
-	summary, err := summaryService.GetArtifactSummary(params)
+	// Use the correct Violations API endpoint instead of SummaryService (which hangs for Docker images)
+	vulns, err := queryXrayViolationsViaCLIVulnerabilities(serverId, projectKey, artifactPath)
 	if err != nil {
-		log.Warn(fmt.Sprintf("Xray summary call failed: %v", err))
-		return nil, err
+		return nil, fmt.Errorf("failed to query Xray Violations API via CLI: %w", err)
 	}
 
-	// Check for API errors in response
-	if len(summary.Errors) > 0 {
-		log.Warn("API returned errors:")
-		for _, apiError := range summary.Errors {
-			log.Warn(fmt.Sprintf("  Error for %s: %s", apiError.Identifier, apiError.Error))
-		}
-		return nil, fmt.Errorf("API returned %d errors", len(summary.Errors))
-	}
-
-	log.Info(fmt.Sprintf("Xray summary found %d artifacts", len(summary.Artifacts)))
-
-	var vulnerabilities []services.Vulnerability
-	if summary != nil && len(summary.Artifacts) > 0 {
-		for i, artifact := range summary.Artifacts {
-			log.Info(fmt.Sprintf("Artifact %d: %s (Component: %s, Type: %s, Issues: %d)",
-				i+1, artifact.General.Path, artifact.General.ComponentId,
-				artifact.General.PkgType, len(artifact.Issues)))
-
-			for _, issue := range artifact.Issues {
-
-				vuln := services.Vulnerability{
-					IssueId:    issue.IssueId,
-					Summary:    issue.Summary,
-					Severity:   issue.Severity,
-					Cves:       convertSummaryCvesToCves(issue.Cves),
-					Technology: issue.IssueType, // Store issue type in Technology field
-				}
-
-				// Preserve issue description in ExtendedInformation for JFrog research analysis
-				if issue.Description != "" {
-					vuln.ExtendedInformation = &services.ExtendedInformation{
-						FullDescription: issue.Description,
-					}
-					// Log first 100 chars of description for debugging
-					desc := issue.Description
-					if len(desc) > 100 {
-						desc = desc[:100] + "..."
-					}
-					log.Debug(fmt.Sprintf("Issue %s has description: '%s'", issue.IssueId, desc))
-				}
-
-				if issue.IssueType != "" {
-					log.Debug(fmt.Sprintf("Issue %s has type: '%s'", issue.IssueId, issue.IssueType))
-				}
-				vulnerabilities = append(vulnerabilities, vuln)
-			}
-		}
-	}
-
-	log.Info(fmt.Sprintf("Extracted %d vulnerabilities from Xray summary", len(vulnerabilities)))
-	return vulnerabilities, nil
+	log.Info(fmt.Sprintf("Extracted %d vulnerabilities from Violations API response", len(vulns)))
+	return vulns, nil
 }
 
-func convertSummaryCvesToCves(summaryCves []services.SummaryCve) []services.Cve {
+// convertCLICvesToCves converts CVEs from CLI format to SDK Vulnerability.Cves format
+func convertCLICvesToCves(cliCves []xrayCve) []services.Cve {
 	var cves []services.Cve
-	for _, sc := range summaryCves {
+	for _, cc := range cliCves {
 		cve := services.Cve{
-			Id:          sc.Id,
-			CvssV2Score: sc.CvssV2Score,
-			CvssV3Score: sc.CvssV3Score,
-			Cwe:         sc.Cwe,
+			Id:          cc.Id,
+			CvssV2Score: cc.CvssV2Score,
+			CvssV3Score: cc.CvssV3Score,
+			Cwe:         cc.Cwe,
 		}
 		cves = append(cves, cve)
 	}
 	return cves
 }
 
+// checkMaliciousPackageCLI checks if an issue is malicious using JFrog CLI Events API.
+func checkMaliciousPackageCLI(serverId string, issueId string) (bool, error) {
+	if issueId == "" {
+		return false, nil
+	}
+
+	isMalicious, err := queryXrayEventsViaCLI(serverId, issueId)
+	if err != nil {
+		log.Debug(fmt.Sprintf("Failed to query Events API via CLI for %s: %v", issueId, err))
+		return false, err
+	}
+
+	if isMalicious {
+		log.Info(fmt.Sprintf("🚨 JFrog CLI confirmed malicious package: %s", issueId))
+	}
+
+	return isMalicious, nil
+}
+
+// parseMaliciousPackageFromEventsResponse extracts malicious package status from Events API response.
 func parseMaliciousPackageFromEventsResponse(body []byte) (isMalicious bool, foundField bool, err error) {
 	var payload interface{}
 	if err := json.Unmarshal(body, &payload); err != nil {
@@ -423,85 +342,70 @@ func collectUniqueIssueIDs(report *VulnerabilityReport) []string {
 	return issueIDs
 }
 
-func countMaliciousIssuesFromEvents(xrManager *xray.XrayServicesManager, issueIDs []string) int {
-	count := 0
+// prefetchMaliciousStatuses queries the Events API for all unique issue IDs concurrently.
+// This batches what would otherwise be N sequential HTTP calls into parallel requests.
+func prefetchMaliciousStatuses(serverId string, issueIDs []string) {
+	var wg sync.WaitGroup
+
 	for _, issueID := range issueIDs {
-		if isMaliciousWithCache(xrManager, issueID) {
-			count++
+		if issueID == "" {
+			continue
+		}
+
+		maliciousCacheMutex.RLock()
+		_, exists := maliciousCache[issueID]
+		maliciousCacheMutex.RUnlock()
+
+		if !exists {
+			wg.Add(1)
+			go func(id string) {
+				defer wg.Done()
+				isMalicious, err := checkMaliciousPackage(serverId, id)
+				if err != nil {
+					log.Debug(fmt.Sprintf("Events API error for %s: %v", id, err))
+					return
+				}
+
+				if isMalicious {
+					log.Info(fmt.Sprintf("🚨 Events API confirmed malicious package: %s", id))
+				}
+
+				maliciousCacheMutex.Lock()
+				maliciousCache[id] = isMalicious
+				maliciousCacheMutex.Unlock()
+			}(issueID)
 		}
 	}
+
+	wg.Wait()
+}
+
+// countMaliciousIssuesFromEvents queries the Events API for malicious package detection.
+// Uses concurrent prefetching to batch sequential HTTP calls into parallel requests.
+func countMaliciousIssuesFromEvents(serverId string, issueIDs []string) int {
+	if len(issueIDs) == 0 {
+		return 0
+	}
+
+	// First, prefetch all unique statuses concurrently (batches N sequential HTTP calls into parallel)
+	prefetchMaliciousStatuses(serverId, issueIDs)
+
+	// Then count cached results (fast — no more HTTP calls needed)
+	count := 0
+	for _, issueID := range issueIDs {
+		maliciousCacheMutex.RLock()
+		if maliciousCache[issueID] {
+			count++
+		}
+		maliciousCacheMutex.RUnlock()
+	}
+
 	return count
 }
 
-// getDockerImagePaths returns Docker manifest paths that Xray expects for Docker images
-// Based on discovery that Xray expects paths like: docker/docker-local/jmhxraytest/11/manifest.json
-func getDockerImagePaths(repoKey, imageName, tag string) []string {
-	var paths []string
-
-	// PRIMARY FORMAT: Docker package paths with manifest.json (CORRECT FORMAT!)
-	// Based on user discovery: docker/docker-local/jmhxraytest/11/manifest.json
-	paths = append(paths, fmt.Sprintf("docker/%s/%s/%s/manifest.json", repoKey, imageName, tag))
-	paths = append(paths, fmt.Sprintf("docker/%s/%s/%s/list.manifest.json", repoKey, imageName, tag))
-
-	// Alternative Docker package formats
-	paths = append(paths, fmt.Sprintf("docker/%s/%s/%s", repoKey, imageName, tag))
-	paths = append(paths, fmt.Sprintf("docker/%s/%s:%s", repoKey, imageName, tag))
-
-	// Docker package without repo prefix (for multi-repo setups)
-	paths = append(paths, fmt.Sprintf("docker/%s/%s/manifest.json", imageName, tag))
-	paths = append(paths, fmt.Sprintf("docker/%s/%s/list.manifest.json", imageName, tag))
-
-	// Standard Docker artifact paths (legacy formats - keeping for compatibility)
-	paths = append(paths, fmt.Sprintf("%s/%s:%s", repoKey, imageName, tag))
-	paths = append(paths, fmt.Sprintf("%s/%s/%s", repoKey, imageName, tag))
-
-	// Image without repo prefix
-	paths = append(paths, fmt.Sprintf("%s:%s", imageName, tag))
-	paths = append(paths, fmt.Sprintf("%s/%s", imageName, tag))
-
-	// Docker package ID format
-	paths = append(paths, fmt.Sprintf("docker://%s:%s", imageName, tag))
-	paths = append(paths, fmt.Sprintf("docker://%s", imageName))
-
-	// Colon-separated repo format
-	paths = append(paths, fmt.Sprintf("%s:%s/%s", repoKey, imageName, tag))
-
-	// Library namespace (for official images)
-	paths = append(paths, fmt.Sprintf("docker/%s/library/%s/%s/manifest.json", repoKey, imageName, tag))
-	paths = append(paths, fmt.Sprintf("%s/library/%s:%s", repoKey, imageName, tag))
-
-	// Alternative separators
-	paths = append(paths, fmt.Sprintf("%s/%s-%s", repoKey, imageName, tag))
-	paths = append(paths, fmt.Sprintf("%s/%s_%s", repoKey, imageName, tag))
-
-	// URL-encoded formats (for special characters)
-	if strings.Contains(imageName, "-") || strings.Contains(tag, "-") {
-		paths = append(paths, fmt.Sprintf("docker%%2F%s%%2F%s%%2F%s%%2Fmanifest.json", repoKey, imageName, tag))
-	}
-
-	return paths
-}
-
-// parseArtifactPath splits an artifact path into repository and path components
-// Examples:
-//
-//	"docker-local/myimage:1.0" -> ("docker-local", "myimage:1.0")
-//	"docker-local/myimage/1.0" -> ("docker-local", "myimage/1.0")
-func parseArtifactPath(artifactPath string) (repo, path string) {
-	parts := strings.SplitN(artifactPath, "/", 2)
-	if len(parts) == 2 {
-		return parts[0], parts[1]
-	}
-	return "", artifactPath
-}
-
-func filterVulnerabilitiesBySeverity(vulnerabilities []services.Vulnerability, minSeverity string, xrManagers ...*xray.XrayServicesManager) []services.Vulnerability {
+func filterVulnerabilitiesBySeverity(vulnerabilities []services.Vulnerability, minSeverity string, serverId string) []services.Vulnerability {
 	if minSeverity == "" {
 		return vulnerabilities
-	}
-	var xrManager *xray.XrayServicesManager
-	if len(xrManagers) > 0 {
-		xrManager = xrManagers[0]
 	}
 
 	severityOrder := map[string]int{
@@ -527,7 +431,7 @@ func filterVulnerabilitiesBySeverity(vulnerabilities []services.Vulnerability, m
 
 		// Special case: if filtering for "Malicious", only show malicious content
 		if minSeverity == "Malicious" {
-			if xrManager != nil && isMaliciousWithCache(xrManager, vuln.IssueId) {
+			if isMaliciousWithCache(serverId, vuln.IssueId) {
 				filtered = append(filtered, vuln)
 			}
 		} else if vulnLevel >= minLevel {
@@ -539,7 +443,7 @@ func filterVulnerabilitiesBySeverity(vulnerabilities []services.Vulnerability, m
 }
 
 // generateSecurityBanner creates a visual banner based on the security status of findings
-func generateSecurityBanner(xrManager *xray.XrayServicesManager, report *VulnerabilityReport, minSeverity string) {
+func generateSecurityBanner(serverId string, report *VulnerabilityReport, minSeverity string) {
 	// Deduplicate vulnerabilities to analyze the actual findings
 	vulnMap := make(map[string]services.Vulnerability)
 	for _, platform := range report.Platforms {
@@ -559,7 +463,7 @@ func generateSecurityBanner(xrManager *xray.XrayServicesManager, report *Vulnera
 	// Apply the same filtering logic used for display
 	filteredVulns := allVulns
 	if minSeverity != "" {
-		filteredVulns = filterVulnerabilitiesBySeverity(filteredVulns, minSeverity, xrManager)
+		filteredVulns = filterVulnerabilitiesBySeverity(filteredVulns, minSeverity, serverId)
 	}
 
 	// Determine banner type based on filtered findings
@@ -568,7 +472,7 @@ func generateSecurityBanner(xrManager *xray.XrayServicesManager, report *Vulnera
 
 	// Check for malicious content in filtered results
 	for _, vuln := range filteredVulns {
-		if isMaliciousWithCache(xrManager, vuln.IssueId) {
+		if isMaliciousWithCache(serverId, vuln.IssueId) {
 			hasMalicious = true
 			break
 		}
@@ -614,95 +518,21 @@ func generateSecurityBanner(xrManager *xray.XrayServicesManager, report *Vulnera
 	}
 }
 
-// Function to discover what artifacts exist in Xray for the repository
-func discoverXrayArtifacts(xrManager *xray.XrayServicesManager, repoKey, imageName string) {
-	log.Info("=== XRAY ARTIFACT DISCOVERY ===")
-	log.Info("Since you mentioned the image has been scanned with 1 malicious item,")
-	log.Info("let's find the exact path format Xray is using...")
-	log.Info("")
 
-	// Try to search for Docker manifest artifacts with correct paths
-	searchPatterns := []string{
-		fmt.Sprintf("docker/%s", repoKey),                               // docker/docker-local
-		fmt.Sprintf("docker/%s/*", repoKey),                             // docker/docker-local/*
-		fmt.Sprintf("docker/%s/%s", repoKey, imageName),                 // docker/docker-local/jmhxraytest
-		fmt.Sprintf("docker/%s/%s/*", repoKey, imageName),               // docker/docker-local/jmhxraytest/*
-		fmt.Sprintf("docker/%s/%s/*/manifest.json", repoKey, imageName), // docker/docker-local/jmhxraytest/*/manifest.json
-		fmt.Sprintf("*%s*", imageName),                                  // *jmhxraytest* (legacy)
-	}
-
-	for i, pattern := range searchPatterns {
-		log.Info(fmt.Sprintf("Searching Xray for pattern %d: %s", i+1, pattern))
-
-		// Try to get summary with a wildcard search
-		summaryService := services.NewSummaryService(xrManager.Client())
-		summaryService.XrayDetails = xrManager.Config().GetServiceDetails()
-
-		params := services.ArtifactSummaryParams{
-			Paths: []string{pattern},
-		}
-
-		summary, err := summaryService.GetArtifactSummary(params)
-		if err != nil {
-			log.Info(fmt.Sprintf("  Pattern %s failed: %v", pattern, err))
-			continue
-		}
-
-		if summary != nil && len(summary.Artifacts) > 0 {
-			log.Info(fmt.Sprintf("  Found %d artifacts for pattern %s:", len(summary.Artifacts), pattern))
-			for j, artifact := range summary.Artifacts {
-				if j < 10 { // Show first 10 artifacts to find our image
-					issueCount := len(artifact.Issues)
-					if issueCount > 0 {
-						log.Info(fmt.Sprintf("    %d. %s (%d issues) ⚠️", j+1, artifact.General.Path, issueCount))
-						// If this might be our target image, show more details
-						if strings.Contains(artifact.General.Path, imageName) {
-							log.Info(fmt.Sprintf("        *** POTENTIAL MATCH FOR %s ***", imageName))
-							for k, issue := range artifact.Issues {
-								if k < 3 { // Show first 3 issues
-									log.Info(fmt.Sprintf("        Issue %d: %s (%s)", k+1, issue.Summary, issue.Severity))
-								}
-							}
-						}
-					} else {
-						log.Info(fmt.Sprintf("    %d. %s (no issues)", j+1, artifact.General.Path))
-					}
-				}
-			}
-			if len(summary.Artifacts) > 10 {
-				log.Info(fmt.Sprintf("    ... and %d more", len(summary.Artifacts)-10))
-			}
-		} else {
-			log.Info(fmt.Sprintf("  No artifacts found for pattern: %s", pattern))
-		}
-	}
-
-	log.Info("=== END XRAY ARTIFACT DISCOVERY ===")
-	log.Info("")
-	log.Info("TROUBLESHOOTING RECOMMENDATIONS:")
-	log.Info("1. Verify the image has been scanned by Xray")
-	log.Info("2. Check Xray indexing configuration for the repository")
-	log.Info(fmt.Sprintf("3. Expected Xray path format: docker/%s/%s/<tag>/manifest.json", repoKey, imageName))
-	log.Info(fmt.Sprintf("4. Trigger manual scan: jf rt curl -XPOST '/api/v1/scan/graph' -H 'Content-Type: application/json' -d '{\"component_details\":{\"component_id\":\"docker/%s/%s\"}}' --server-id <server-id>", repoKey, imageName))
-	log.Info("5. Check JFrog UI: Administration > Xray > Settings > Repositories")
-	log.Info("6. Verify Docker images appear as 'docker/repo/image/tag/manifest.json' in Xray")
-	log.Info("")
-}
-
-func outputReport(xrManager *xray.XrayServicesManager, report *VulnerabilityReport, output string, minSeverity string, showFindings bool) error {
+func outputReport(serverId string, report *VulnerabilityReport, output string, minSeverity string, showFindings bool) error {
 	switch output {
 	case "json":
-		return outputJSONReport(xrManager, report)
+		return outputJSONReport(serverId, report)
 	case "github-md":
-		return outputMarkdownReport(xrManager, report, minSeverity, showFindings)
+		return outputMarkdownReport(serverId, report, minSeverity, showFindings)
 	default:
 		return fmt.Errorf("unsupported output format: %s. Use 'json' or 'github-md'", output)
 	}
 }
 
-func outputJSONReport(xrManager *xray.XrayServicesManager, report *VulnerabilityReport) error {
+func outputJSONReport(serverId string, report *VulnerabilityReport) error {
 	// Convert to enhanced format
-	enhanced := convertToEnhancedReport(xrManager, report)
+	enhanced := convertToEnhancedReport(serverId, report)
 
 	jsonData, err := json.MarshalIndent(enhanced, "", "  ")
 	if err != nil {
@@ -713,11 +543,11 @@ func outputJSONReport(xrManager *xray.XrayServicesManager, report *Vulnerability
 	return nil
 }
 
-func convertToEnhancedReport(xrManager *xray.XrayServicesManager, report *VulnerabilityReport) *EnhancedVulnerabilityReport {
+func convertToEnhancedReport(serverId string, report *VulnerabilityReport) *EnhancedVulnerabilityReport {
 
 	typeCount := make(map[string]int)
 	issueIDs := collectUniqueIssueIDs(report)
-	maliciousCount := countMaliciousIssuesFromEvents(xrManager, issueIDs)
+	maliciousCount := countMaliciousIssuesFromEvents(serverId, issueIDs)
 
 	var platforms []EnhancedPlatformInfo
 
@@ -731,7 +561,7 @@ func convertToEnhancedReport(xrManager *xray.XrayServicesManager, report *Vulner
 			}
 			typeCount[issueType]++
 
-			malicious := isMaliciousWithCache(xrManager, vuln.IssueId)
+			malicious := isMaliciousWithCache(serverId, vuln.IssueId)
 
 			finding := CompactFinding{
 				IssueId:   vuln.IssueId,
@@ -770,11 +600,16 @@ func convertToEnhancedReport(xrManager *xray.XrayServicesManager, report *Vulner
 	}
 }
 
-func outputMarkdownReport(xrManager *xray.XrayServicesManager, report *VulnerabilityReport, minSeverity string, showFindings bool) error {
+func outputMarkdownReport(serverId string, report *VulnerabilityReport, minSeverity string, showFindings bool) error {
+	// For GitHub MD output, suppress verbose logging and banners for silent operation
+	silent := true
+
 	fmt.Printf("# Xray Security Report: %s\n\n", report.ImageName)
 
-	// Generate security status banner before anything else
-	generateSecurityBanner(xrManager, report, minSeverity)
+	// Only generate banner if not in silent mode (for CI/CD pipelines)
+	if !silent {
+		generateSecurityBanner(serverId, report, minSeverity)
+	}
 
 	// Security Summary with counts
 	fmt.Println("## Security Summary")
@@ -795,7 +630,7 @@ func outputMarkdownReport(xrManager *xray.XrayServicesManager, report *Vulnerabi
 	for issueID := range vulnMap {
 		issueIDs = append(issueIDs, issueID)
 	}
-	maliciousCount := countMaliciousIssuesFromEvents(xrManager, issueIDs)
+	maliciousCount := countMaliciousIssuesFromEvents(serverId, issueIDs)
 
 	// Now count the unique vulnerabilities
 	for _, vuln := range vulnMap {
@@ -809,7 +644,9 @@ func outputMarkdownReport(xrManager *xray.XrayServicesManager, report *Vulnerabi
 
 	}
 
-	log.Info(fmt.Sprintf("📊 Malicious detection summary: Checked %d unique vulnerabilities, found %d malicious packages", len(vulnMap), maliciousCount))
+	if !silent {
+		log.Info(fmt.Sprintf("📊 Malicious detection summary: Checked %d unique vulnerabilities, found %d malicious packages", len(vulnMap), maliciousCount))
+	}
 
 	uniqueVulnCount := len(vulnMap)
 	fmt.Printf("- **Total Findings:** %d\n", uniqueVulnCount)
@@ -832,7 +669,7 @@ func outputMarkdownReport(xrManager *xray.XrayServicesManager, report *Vulnerabi
 
 			// Apply severity filtering
 			if minSeverity != "" {
-				filteredVulns = filterVulnerabilitiesBySeverity(filteredVulns, minSeverity, xrManager)
+				filteredVulns = filterVulnerabilitiesBySeverity(filteredVulns, minSeverity, serverId)
 			}
 
 			fmt.Println("## Security Findings")
@@ -863,7 +700,7 @@ func outputMarkdownReport(xrManager *xray.XrayServicesManager, report *Vulnerabi
 					}
 
 					maliciousIcon := "❌"
-					if isMaliciousWithCache(xrManager, vuln.IssueId) {
+					if isMaliciousWithCache(serverId, vuln.IssueId) {
 						maliciousIcon = "🚨"
 					}
 
@@ -940,26 +777,6 @@ func setupArtifactory(serverDetails *config.ServerDetails) (artifactory.Artifact
 	return artifactory.New(serviceConfig)
 }
 
-func setupXray(serverDetails *config.ServerDetails) (*xray.XrayServicesManager, error) {
-	xrayAuthDetails := xrayAuth.NewXrayDetails()
-
-	xrayUrl := getXrayServiceURL(serverDetails)
-
-	xrayAuthDetails.SetUrl(xrayUrl)
-	xrayAuthDetails.SetAccessToken(serverDetails.GetAccessToken())
-	xrayAuthDetails.SetUser(serverDetails.GetUser())
-	xrayAuthDetails.SetPassword(serverDetails.GetPassword())
-
-	serviceConfig, err := clientconfig.NewConfigBuilder().
-		SetServiceDetails(xrayAuthDetails).
-		Build()
-	if err != nil {
-		return nil, err
-	}
-
-	return xray.New(serviceConfig)
-}
-
 func getXrayServiceURL(serverDetails *config.ServerDetails) string {
 	if configuredXrayURL := strings.TrimSpace(serverDetails.GetXrayUrl()); configuredXrayURL != "" {
 		return strings.TrimSuffix(configuredXrayURL, "/")
@@ -975,35 +792,8 @@ func getXrayServiceURL(serverDetails *config.ServerDetails) string {
 	return strings.TrimSuffix(strings.TrimSpace(serverDetails.GetUrl()), "/") + "/xray"
 }
 
-func buildXrayAPIEndpoint(xrayServiceURL, path string) string {
-	base := strings.TrimSuffix(strings.TrimSpace(xrayServiceURL), "/")
-	if !strings.HasPrefix(path, "/") {
-		path = "/" + path
-	}
-	if strings.HasSuffix(base, "/xray") {
-		return base + path
-	}
-	return base + "/xray" + path
-}
 
-func createDockerRegistryClient(conf *CheckConfiguration, serverDetails *config.ServerDetails) (*DockerRegistryClient, error) {
-	baseURL := conf.DockerRegistryURL
-	if baseURL == "" {
-		// Construct from server details
-		artUrl := serverDetails.GetArtifactoryUrl()
-		baseURL = strings.Replace(artUrl, "/artifactory", "", 1)
-		baseURL = strings.TrimSuffix(baseURL, "/")
-	}
-
-	return &DockerRegistryClient{
-		BaseURL:    baseURL,
-		HTTPClient: &http.Client{Timeout: 30 * time.Second},
-		Username:   serverDetails.GetUser(),
-		Password:   serverDetails.GetPassword(),
-	}, nil
-}
-
-func generateVulnerabilityReport(conf *CheckConfiguration, rtManager artifactory.ArtifactoryServicesManager, xrManager *xray.XrayServicesManager, client *DockerRegistryClient, repoKey, imageName, tag string) (*VulnerabilityReport, error) {
+func generateVulnerabilityReport(conf *CheckConfiguration, rtManager artifactory.ArtifactoryServicesManager, repoKey, imageName, tag string) (*VulnerabilityReport, error) {
 	if !conf.Silent {
 		log.Info(fmt.Sprintf("Generating vulnerability report for %s/%s:%s", repoKey, imageName, tag))
 	}
@@ -1014,82 +804,114 @@ func generateVulnerabilityReport(conf *CheckConfiguration, rtManager artifactory
 		Platforms:   []PlatformVulnerabilityInfo{},
 	}
 
-	// Generate potential Docker image paths for Xray scanning
-	dockerPaths := getDockerImagePaths(repoKey, imageName, tag)
+	// Step 1: Dual-path discovery (handles both single-platform and multi-platform images)
 	if !conf.Silent {
-		log.Info(fmt.Sprintf("Trying %d different Docker path formats", len(dockerPaths)))
+		log.Info("Running dual-path manifest discovery...")
+	}
+	platformPaths, err := discoverImageArtifacts(conf.ServerId, repoKey, imageName, tag)
+	if err != nil {
+		return nil, fmt.Errorf("manifest discovery failed: %w", err)
 	}
 
-	// Use a map to deduplicate vulnerabilities by Xray ID
+	if len(platformPaths) == 0 {
+		if !conf.Silent {
+			log.Warn("No artifacts discovered — image may not be indexed in Xray or may use an unexpected path format")
+		}
+		return report, nil
+	}
+
+	if !conf.Silent {
+		log.Info(fmt.Sprintf("Discovered %d artifact path(s) for vulnerabilities", len(platformPaths)))
+	}
+
+	// Step 2: Apply platform/OS filtering if specified
+	if conf.Platform != "" || conf.OS != "" {
+		arch := ""
+		if conf.Platform != "" {
+			parts := strings.SplitN(conf.Platform, "/", 2)
+			if len(parts) == 2 {
+				conf.OS = parts[0]
+				arch = parts[1]
+			} else {
+				// --platform without slash: treat entire value as OS
+				arch = conf.OS
+				conf.OS = ""
+			}
+		}
+		filtered := FilterManifestsByPlatform(platformPaths, arch, conf.OS)
+		if len(filtered) == 0 {
+			if !conf.Silent {
+				log.Warn(fmt.Sprintf("No platforms match filter (arch=%q, os=%q)", arch, conf.OS))
+			}
+			return report, nil
+		}
+		platformPaths = filtered
+		if !conf.Silent {
+			log.Info(fmt.Sprintf("After platform/OS filtering: %d path(s) remaining", len(platformPaths)))
+		}
+	}
+
+	// Step 3: Query vulnerabilities for each platform path
 	vulnMap := make(map[string]services.Vulnerability)
 	var successfulPath string
+	totalVulnsAcrossPlatforms := 0
 
-	// Try each Docker path format until we get vulnerability data
-	for _, path := range dockerPaths {
+	for _, dp := range platformPaths {
 		if !conf.Silent {
-			log.Debug(fmt.Sprintf("Trying path: %s", path))
+			log.Info(fmt.Sprintf("Querying Xray for: %s (digests: %v)", dp.path, dp.digests))
 		}
 
-		// Query vulnerabilities using Xray SummaryService from the JFrog Go SDK.
-		vulns, err := getArtifactSummaryVulnerabilities(xrManager, path, "")
-		if err == nil && len(vulns) > 0 {
-			// Add vulnerabilities to map (deduplicating by IssueId)
+		var vulns []services.Vulnerability
+		var err error
+
+		if len(dp.digests) > 0 {
+			// Multi-platform or single-platform with digest — query by checksum (checksums now ignored, path is primary key for Violations API)
+			vulns, err = getArtifactSummaryVulnerabilitiesCLI(conf.ServerId, conf.ProjectKey, dp.path)
+		} else {
+			// Single-platform without explicit digest — query by path only
+			vulns, err = getArtifactSummaryVulnerabilitiesCLI(conf.ServerId, conf.ProjectKey, dp.path)
+		}
+
+		if err != nil {
+			log.Debug(fmt.Sprintf("No data found for path: %s (error: %v)", dp.path, err))
+			continue
+		}
+
+		if len(vulns) > 0 {
 			beforeCount := len(vulnMap)
 			for _, vuln := range vulns {
 				if vuln.IssueId != "" {
 					vulnMap[vuln.IssueId] = vuln
 				}
 			}
-			afterCount := len(vulnMap)
+			newUnique := len(vulnMap) - beforeCount
+
 			if successfulPath == "" {
-				successfulPath = path
+				successfulPath = dp.path
 			}
-			if !conf.Silent {
-				log.Info(fmt.Sprintf("Found %d vulnerabilities using Xray SummaryService with path: %s", len(vulns), path))
-				if beforeCount != afterCount {
-					log.Info(fmt.Sprintf("Added %d new unique vulnerabilities (total unique: %d)", afterCount-beforeCount, afterCount))
-				}
+
+			log.Info(fmt.Sprintf("Found %d vulnerabilities at path: %s (new unique: %d)",
+				len(vulns), dp.path, newUnique))
+
+			// Build platform-specific vulnerability group
+			platformInfo := PlatformVulnerabilityInfo{
+				Vulnerabilities:  vulns,
+				ManifestDigest:   dp.digests[0],
+				Platform: Platform{
+					OS:           dp.os,
+					Architecture: dp.arch,
+				},
 			}
-			break // Found data, stop trying more paths
-		}
 
-		if !conf.Silent {
-			log.Debug(fmt.Sprintf("No data found for path: %s", path))
+			report.Platforms = append(report.Platforms, platformInfo)
+			totalVulnsAcrossPlatforms += len(vulns)
 		}
 	}
 
-	// Convert map back to slice for processing
-	var allVulns []services.Vulnerability
-	for _, vuln := range vulnMap {
-		allVulns = append(allVulns, vuln)
-	}
-
-	// If no vulnerabilities found through direct paths, try discovery approach
-	if len(allVulns) == 0 {
-		if !conf.Silent {
-			log.Info("Direct path lookup failed, trying discovery approach...")
-			// Run discovery for debugging (doesn't return artifacts, just logs)
-			discoverXrayArtifacts(xrManager, repoKey, imageName)
-		}
-	}
-
-	// Process vulnerabilities into platform-specific groups
-	if len(allVulns) > 0 {
-		// For now, group all vulns under a single platform since we don't have manifest parsing
-		// In a full implementation, you'd parse Docker manifests to get platform-specific data
-		platformInfo := PlatformVulnerabilityInfo{
-			Platform: Platform{
-				Architecture: "amd64",
-				OS:           "linux",
-			},
-			Vulnerabilities: allVulns, // Use the raw vulnerabilities from Xray
-		}
-
-		report.Platforms = append(report.Platforms, platformInfo)
-
-		// Calculate summary counts
-		report.TotalIssues = len(allVulns)
-		for _, vuln := range allVulns {
+	// Step 4: Calculate summary counts from all platforms
+	report.TotalIssues = totalVulnsAcrossPlatforms
+	for _, platform := range report.Platforms {
+		for _, vuln := range platform.Vulnerabilities {
 			switch vuln.Severity {
 			case "Critical":
 				report.CriticalCount++
@@ -1101,12 +923,12 @@ func generateVulnerabilityReport(conf *CheckConfiguration, rtManager artifactory
 				report.LowCount++
 			}
 		}
+	}
 
-		if successfulPath != "" && !conf.Silent {
-			log.Info(fmt.Sprintf("Successfully generated report with %d vulnerabilities from path: %s",
-				len(allVulns), successfulPath))
-		}
-	} else {
+	if successfulPath != "" && !conf.Silent {
+		log.Info(fmt.Sprintf("Successfully generated report with %d vulnerabilities from path: %s",
+			totalVulnsAcrossPlatforms, successfulPath))
+	} else if totalVulnsAcrossPlatforms == 0 {
 		if !conf.Silent {
 			log.Info("No vulnerabilities found for this image")
 		}

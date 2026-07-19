@@ -48,6 +48,7 @@ type CheckConfiguration struct {
 	ShowFindings      bool
 	DebugPaths        bool
 	DockerRegistryURL string
+	ProjectKey        string // Xray project key for violation queries (defaults to "default")
 }
 
 type VulnerabilityReport struct {
