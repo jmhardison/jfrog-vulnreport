@@ -1,4 +1,5 @@
-// check will search for vulnerabilities in the specified image and generate a report based on existing scans
+// Package internal implements the core logic for the jfrog-vulnreport plugin: orchestrating Docker
+// manifest discovery, Xray vulnerability queries via the Violations API, and report formatting.
 package internal
 
 import (
@@ -10,14 +11,11 @@ import (
 
 	"github.com/jfrog/jfrog-cli-core/v2/plugins/components"
 	"github.com/jfrog/jfrog-cli-core/v2/utils/config"
-	"github.com/jfrog/jfrog-client-go/artifactory"
-	artifactoryAuth "github.com/jfrog/jfrog-client-go/artifactory/auth"
-	clientconfig "github.com/jfrog/jfrog-client-go/config"
 	"github.com/jfrog/jfrog-client-go/utils/log"
 	"github.com/jfrog/jfrog-client-go/xray/services"
 )
 
-// Constants for media types
+// Constants for Docker media types recognized during manifest discovery.
 const (
 	MediaTypeManifest     = "application/vnd.docker.distribution.manifest.v2+json"
 	MediaTypeManifestList = "application/vnd.docker.distribution.manifest.list.v2+json"
@@ -25,6 +23,8 @@ const (
 	MediaTypeOCIIndex     = "application/vnd.oci.image.index.v1+json"
 )
 
+// RunCheckCommand is the entry point invoked by JFrog CLI's plugin framework. It parses CLI arguments,
+// configures Xray/Artifactory connections, generates a vulnerability report, and formats output.
 func RunCheckCommand(c *components.Context) error {
 	if len(c.Arguments) == 0 {
 		return fmt.Errorf("image name is required. Usage: check <image:tag>")
@@ -75,26 +75,27 @@ func RunCheckCommand(c *components.Context) error {
 		log.Info(fmt.Sprintf("Checking vulnerabilities for image: %s/%s:%s", repoKey, imageName, tag))
 	}
 
-	// Setup JFrog service connections
+	// Construct Artifactory URL and manifest path for linking from markdown output.
+	// The manifest URL points to <artifactoryUrl>/<repo>/<image>/<tag>/manifest.json — users can click
+	// this link in the github-md report to view their image directly in Artifactory's UI.
 	serverDetails, err := getServerDetails(conf.ServerId)
 	if err != nil {
 		return fmt.Errorf("failed to get server configuration: %w", err)
 	}
 
-	rtManager, err := setupArtifactory(serverDetails)
-	if err != nil {
-		return fmt.Errorf("failed to setup Artifactory connection: %w", err)
-	}
+	// Extract base Artifactory URL and build manifest link path for github-md output.
+	artifactoryUrl := strings.TrimRight(serverDetails.GetArtifactoryUrl(), "/")
+	manifestPath := fmt.Sprintf("%s/%s/%s/manifest.json", repoKey, imageName, tag)
 
 	// Generate vulnerability report (all Xray queries use CLI wrappers in internal/xray_cli.go).
 	// The malicious lookup map is populated from the Violations API response, eliminating N+1 Events API calls.
-	report, maliciousLookup, err := generateVulnerabilityReport(conf, rtManager, repoKey, imageName, tag)
+	report, maliciousLookup, err := generateVulnerabilityReport(conf, serverDetails, repoKey, imageName, tag)
 	if err != nil {
 		return fmt.Errorf("failed to generate vulnerability report: %w", err)
 	}
 
-	// Output the report
-	if err := outputReport(conf.ServerId, report, maliciousLookup, conf.Output, conf.MinSeverity, conf.ShowFindings); err != nil {
+	// Output the report (passes artifactoryUrl and manifestPath through for github-md links).
+	if err := outputReport(report, maliciousLookup, conf.Output, artifactoryUrl, manifestPath, conf.MinSeverity, conf.ShowFindings); err != nil {
 		return fmt.Errorf("failed to output report: %w", err)
 	}
 
@@ -108,11 +109,13 @@ func RunCheckCommand(c *components.Context) error {
 
 // Helper functions for enhanced report formatting
 
-// extractIssueType gets the issue type from JFrog's official classification
+// extractIssueType classifies a vulnerability by its source (CVE, Malware, License, etc.) using the
+// Technology field populated from the Violations API response. Falls back to issue ID pattern matching
+// for legacy compatibility with older Xray data that may not include Technology.
 func extractIssueType(vuln services.Vulnerability) string {
 	// Use JFrog's official issue type classification stored in Technology field
 	if vuln.Technology != "" {
-		// Capitalize first letter for display
+		// Capitalize first letter for display (using strings.Title is acceptable here since we control the input)
 		issueType := strings.Title(strings.ToLower(vuln.Technology))
 		return issueType
 	}
@@ -137,7 +140,7 @@ func extractIssueType(vuln services.Vulnerability) string {
 }
 
 
-// getSeverityIcon returns an appropriate icon for severity levels
+// getSeverityIcon maps a severity name to its corresponding emoji indicator.
 func getSeverityIcon(severity string) string {
 	switch strings.ToLower(severity) {
 	case "critical":
@@ -152,16 +155,6 @@ func getSeverityIcon(severity string) string {
 		return "⚪"
 	}
 }
-
-// Helper function to get minimum of two integers
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
-
 
 // getArtifactSummaryVulnerabilitiesCLI queries Xray Violations API using JFrog CLI subprocess to bypass JWT audience restrictions.
 // Replaced SummaryService (/api/v1/summary/artifact) which hangs indefinitely for Docker images with Violations API (/api/v1/violations).
@@ -181,6 +174,8 @@ func getArtifactSummaryVulnerabilitiesCLI(serverId, projectKey, artifactPath str
 }
 
 
+// filterVulnerabilitiesBySeverity filters a vulnerability list by minimum severity threshold.
+// When minSeverity is "Malicious", uses the pre-built lookup map (no Events API calls needed).
 func filterVulnerabilitiesBySeverity(vulnerabilities []services.Vulnerability, minSeverity string, maliciousLookup map[string]bool) []services.Vulnerability {
 	if minSeverity == "" {
 		return vulnerabilities
@@ -191,7 +186,7 @@ func filterVulnerabilitiesBySeverity(vulnerabilities []services.Vulnerability, m
 		"Medium":    2,
 		"High":      3,
 		"Critical":  4,
-		"Malicious": 5, // Highest severity level
+		"Malicious": 5, // Highest severity level — only includes findings flagged malicious in Violations API
 	}
 
 	minLevel, exists := severityOrder[minSeverity]
@@ -221,7 +216,9 @@ func filterVulnerabilitiesBySeverity(vulnerabilities []services.Vulnerability, m
 	return filtered
 }
 
-// generateSecurityBanner creates a visual banner based on the security status of findings.
+// generateSecurityBanner renders a GitHub-flavored alert banner (CAUTION/WARNING/NOTE) based on whether
+// the report contains malicious packages or any vulnerabilities. Uses pre-built lookup map for malicious
+// detection — no Events API calls needed during output formatting.
 func generateSecurityBanner(report *VulnerabilityReport, maliciousLookup map[string]bool, minSeverity string) {
 	// Deduplicate vulnerabilities to analyze the actual findings
 	vulnMap := make(map[string]services.Vulnerability)
@@ -298,17 +295,22 @@ func generateSecurityBanner(report *VulnerabilityReport, maliciousLookup map[str
 }
 
 
-func outputReport(serverId string, report *VulnerabilityReport, maliciousLookup map[string]bool, output string, minSeverity string, showFindings bool) error {
+// outputReport dispatches to the appropriate formatter based on the requested output format.
+// artifactoryUrl and manifestPath are used by github-md output to render a clickable link to the image's
+// manifest in Artifactory — no additional API calls needed, just URL construction from server config.
+func outputReport(report *VulnerabilityReport, maliciousLookup map[string]bool, output string, artifactoryUrl, manifestPath string, minSeverity string, showFindings bool) error {
 	switch output {
 	case "json":
 		return outputJSONReport(report, maliciousLookup)
 	case "github-md":
-		return outputMarkdownReport(report, maliciousLookup, minSeverity, showFindings)
+		return outputMarkdownReport(report, maliciousLookup, artifactoryUrl, manifestPath, minSeverity, showFindings)
 	default:
 		return fmt.Errorf("unsupported output format: %s. Use 'json' or 'github-md'", output)
 	}
 }
 
+// outputJSONReport converts the VulnerabilityReport to an EnhancedVulnerabilityReport (with per-finding
+// malicious status and issue type counts), then prints it as indented JSON to stdout.
 func outputJSONReport(report *VulnerabilityReport, maliciousLookup map[string]bool) error {
 	// Convert to enhanced format using pre-built malicious lookup (no Events API calls needed).
 	enhanced := convertToEnhancedReport(report, maliciousLookup)
@@ -322,6 +324,9 @@ func outputJSONReport(report *VulnerabilityReport, maliciousLookup map[string]bo
 	return nil
 }
 
+// convertToEnhancedReport flattens the per-platform VulnerabilityReport into a single aggregated view.
+// The malicious lookup map (built from Violations API response) is used to annotate each finding with
+// its malicious status — no additional HTTP requests needed.
 func convertToEnhancedReport(report *VulnerabilityReport, maliciousLookup map[string]bool) *EnhancedVulnerabilityReport {
 
 	typeCount := make(map[string]int)
@@ -381,11 +386,23 @@ func convertToEnhancedReport(report *VulnerabilityReport, maliciousLookup map[st
 	}
 }
 
-func outputMarkdownReport(report *VulnerabilityReport, maliciousLookup map[string]bool, minSeverity string, showFindings bool) error {
+// outputMarkdownReport generates a GitHub-flavored markdown security report. Uses the pre-built malicious
+// lookup map (no Events API calls) for per-finding malicious status and summary counts. The artifactoryUrl
+// and manifestPath parameters are used to render a clickable link to the image's manifest in Artifactory —
+// constructed as <artifactoryUrl>/<repo>/<image>/<tag>/manifest.json without additional HTTP requests.
+func outputMarkdownReport(report *VulnerabilityReport, maliciousLookup map[string]bool, artifactoryUrl, manifestPath string, minSeverity string, showFindings bool) error {
 	// For GitHub MD output, suppress verbose logging and banners for silent operation
 	silent := true
 
 	fmt.Printf("# Xray Security Report: %s\n\n", report.ImageName)
+
+	// Render a clickable link to the image's manifest in Artifactory so users can view their image directly.
+	// The URL is constructed from server config without additional API calls — just string concatenation.
+	if artifactoryUrl != "" && manifestPath != "" {
+		fmt.Printf("> **View manifest:** [%s](%s/%s)\n\n", report.ImageName, strings.TrimRight(artifactoryUrl, "/"), manifestPath)
+	}
+
+	fmt.Println()
 
 	// Only generate banner if not in silent mode (for CI/CD pipelines)
 	if !silent {
@@ -437,7 +454,16 @@ func outputMarkdownReport(report *VulnerabilityReport, maliciousLookup map[strin
 	fmt.Printf("- **Critical:** %d | **High:** %d | **Medium:** %d | **Low:** %d\n",
 		report.CriticalCount, report.HighCount, report.MediumCount, report.LowCount)
 	fmt.Printf("- **Malicious:** %d\n", maliciousCount)
-	fmt.Printf("- **Platforms Scanned:** %d\n\n", len(report.Platforms))
+	fmt.Printf("- **Platforms Scanned:** %d\n", len(report.Platforms))
+	if len(report.Platforms) > 0 {
+		var platformList []string
+		for _, p := range report.Platforms {
+			platformList = append(platformList, fmt.Sprintf("%s/%s", p.Platform.OS, p.Platform.Architecture))
+		}
+		fmt.Printf("- **Platforms:** %s\n\n", strings.Join(platformList, ", "))
+	} else {
+		fmt.Println()
+	}
 
 	// Display consolidated findings table with optional severity filtering
 	if showFindings {
@@ -517,6 +543,8 @@ func outputMarkdownReport(report *VulnerabilityReport, maliciousLookup map[strin
 
 // Missing functions - minimal implementations
 
+// parseImageName splits a full image reference (e.g., "docker-local/myimage:latest") into its
+// repository key, image name, and tag components. Used as the first step in artifact discovery.
 func parseImageName(imageName string) (string, string, string, error) {
 	trimmed := strings.TrimSpace(imageName)
 	if trimmed == "" {
@@ -544,23 +572,6 @@ func getServerDetails(serverId string) (*config.ServerDetails, error) {
 	return config.GetSpecificConfig(serverId, true, false)
 }
 
-func setupArtifactory(serverDetails *config.ServerDetails) (artifactory.ArtifactoryServicesManager, error) {
-	artAuth := artifactoryAuth.NewArtifactoryDetails()
-	artAuth.SetUrl(serverDetails.GetArtifactoryUrl())
-	artAuth.SetAccessToken(serverDetails.GetAccessToken())
-	artAuth.SetUser(serverDetails.GetUser())
-	artAuth.SetPassword(serverDetails.GetPassword())
-
-	serviceConfig, err := clientconfig.NewConfigBuilder().
-		SetServiceDetails(artAuth).
-		Build()
-	if err != nil {
-		return nil, err
-	}
-
-	return artifactory.New(serviceConfig)
-}
-
 func getXrayServiceURL(serverDetails *config.ServerDetails) string {
 	if configuredXrayURL := strings.TrimSpace(serverDetails.GetXrayUrl()); configuredXrayURL != "" {
 		return strings.TrimSuffix(configuredXrayURL, "/")
@@ -577,7 +588,16 @@ func getXrayServiceURL(serverDetails *config.ServerDetails) string {
 }
 
 
-func generateVulnerabilityReport(conf *CheckConfiguration, rtManager artifactory.ArtifactoryServicesManager, repoKey, imageName, tag string) (*VulnerabilityReport, map[string]bool, error) {
+// generateVulnerabilityReport orchestrates the full vulnerability query pipeline:
+//  1. Discovers artifact paths via Artifactory search (handles both single and multi-platform images)
+//  2. Queries Xray Violations API for each platform path
+//  3. Builds a malicious lookup map from Violations response data
+//  4. Aggregates vulnerability counts across all platforms
+//
+// The maliciousLookup map is populated from the Violations API response (not Events API), eliminating
+// N+1 HTTP requests. It maps issue ID → whether it's a malicious package, and is passed to output
+// functions for use in report generation.
+func generateVulnerabilityReport(conf *CheckConfiguration, serverDetails *config.ServerDetails, repoKey, imageName, tag string) (*VulnerabilityReport, map[string]bool, error) {
 	if !conf.Silent {
 		log.Info(fmt.Sprintf("Generating vulnerability report for %s/%s:%s", repoKey, imageName, tag))
 	}
@@ -592,7 +612,7 @@ func generateVulnerabilityReport(conf *CheckConfiguration, rtManager artifactory
 	if !conf.Silent {
 		log.Info("Running dual-path manifest discovery...")
 	}
-	platformPaths, err := discoverImageArtifacts(conf.ServerId, repoKey, imageName, tag)
+	platformPaths, err := discoverImageArtifacts(conf.ServerId, serverDetails, repoKey, imageName, tag)
 	if err != nil {
 		return nil, nil, fmt.Errorf("manifest discovery failed: %w", err)
 	}
@@ -665,14 +685,15 @@ func generateVulnerabilityReport(conf *CheckConfiguration, rtManager artifactory
 			continue
 		}
 
-		if len(results) > 0 {
-			beforeCount := len(vulnMap)
-			for _, r := range results {
-				if r.Vulnerability.IssueId != "" {
-					vulnMap[r.Vulnerability.IssueId] = r.Vulnerability
-					maliciousLookup[r.Vulnerability.IssueId] = r.MaliciousPackage
-				}
+		beforeCount := len(vulnMap)
+		for _, r := range results {
+			if r.Vulnerability.IssueId != "" {
+				vulnMap[r.Vulnerability.IssueId] = r.Vulnerability
+				maliciousLookup[r.Vulnerability.IssueId] = r.MaliciousPackage
 			}
+		}
+
+		if len(results) > 0 {
 			newUnique := len(vulnMap) - beforeCount
 
 			if successfulPath == "" {
@@ -681,26 +702,39 @@ func generateVulnerabilityReport(conf *CheckConfiguration, rtManager artifactory
 
 			log.Info(fmt.Sprintf("Found %d vulnerabilities at path: %s (new unique: %d)",
 				len(results), dp.path, newUnique))
-
-			// Build platform-specific vulnerability group — extract plain Vulnerabilities for report storage.
-			var vulns []services.Vulnerability
-			for _, r := range results {
-				vulns = append(vulns, r.Vulnerability)
-			}
-
-			// Build platform-specific vulnerability group
-			platformInfo := PlatformVulnerabilityInfo{
-				Vulnerabilities:  vulns,
-				ManifestDigest:   dp.digests[0],
-				Platform: Platform{
-					OS:           dp.os,
-					Architecture: dp.arch,
-				},
-			}
-
-			report.Platforms = append(report.Platforms, platformInfo)
-			totalVulnsAcrossPlatforms += len(results)
+		} else if !conf.Silent {
+			log.Debug(fmt.Sprintf("No vulnerabilities found for path: %s", dp.path))
 		}
+
+		totalVulnsAcrossPlatforms += len(results)
+
+		// Defensive filter: skip platforms with unknown OS or architecture.
+		// This catches edge cases where the early filter in expandListManifest missed something (e.g., malformed single-platform manifests).
+		if strings.EqualFold(dp.os, "unknown") || dp.os == "" {
+			log.Debug(fmt.Sprintf("Skipping platform with unknown OS: path=%s", dp.path))
+			continue
+		}
+		if strings.EqualFold(dp.arch, "unknown") || dp.arch == "" {
+			log.Debug(fmt.Sprintf("Skipping platform with unknown architecture: path=%s", dp.path))
+			continue
+		}
+
+		// Always record the platform in the report — even with 0 findings, users need to see what was scanned.
+		var vulns []services.Vulnerability
+		for _, r := range results {
+			vulns = append(vulns, r.Vulnerability)
+		}
+
+		platformInfo := PlatformVulnerabilityInfo{
+			Vulnerabilities:  vulns,
+			ManifestDigest:   dp.digests[0],
+			Platform: Platform{
+				OS:           dp.os,
+				Architecture: dp.arch,
+			},
+		}
+
+		report.Platforms = append(report.Platforms, platformInfo)
 	}
 
 	// Step 4: Calculate summary counts from all platforms

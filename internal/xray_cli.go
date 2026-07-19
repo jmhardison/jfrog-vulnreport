@@ -1,17 +1,28 @@
+// Package internal implements JFrog CLI subprocess wrappers for Xray and Artifactory APIs.
+//
+// All API calls go through `jf xr curl` / `jf rt search` subprocess commands because the plugin's
+// JWT authentication token has audience restrictions that prevent direct SDK client usage (401 errors).
 package internal
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"os/exec"
 	"strings"
 
+	"github.com/jfrog/jfrog-cli-core/v2/utils/config"
 	"github.com/jfrog/jfrog-client-go/utils/log"
-	"github.com/jfrog/jfrog-client-go/xray/services"
+	xrayServices "github.com/jfrog/jfrog-client-go/xray/services"
 )
 
 // runJFCmd executes a JFrog CLI command with the given arguments and returns stdout as bytes.
 // Handles server-id flag injection and common error formatting for all CLI wrappers.
+//
+// All Xray API calls must go through this wrapper (or its typed siblings) because direct SDK
+// client calls fail with 401 due to JWT audience restrictions on the plugin's authentication token.
 func runJFCmd(serverId string, baseArgs []string) ([]byte, error) {
 	args := append([]string{}, baseArgs...)
 	if serverId != "" {
@@ -158,6 +169,133 @@ func fetchArtifactBodyViaCLI(serverId string, artifactPath string) ([]byte, erro
 	return output, nil
 }
 
+// fetchArtifactoryArtifactBody fetches the raw body of an artifact stored in Artifactory using the JFrog SDK's
+// HTTP client. Unlike Xray's artifact-get endpoint (which serves scan results), this retrieves actual file content
+// from Artifactory storage — required for list.manifest.json which holds per-platform digest metadata.
+func fetchArtifactoryArtifactBody(serverDetails *config.ServerDetails, repoKey, artifactPath string) ([]byte, error) {
+	if serverDetails == nil || repoKey == "" || artifactPath == "" {
+		return nil, fmt.Errorf("server details, repo key, and artifact path are all required")
+	}
+
+	// Note: serverDetails.GetArtifactoryUrl() already includes the /artifactory prefix (e.g., "https://host/jfrog/artifactory"),
+	// so we do NOT add another /artifactory/ — doing so produces a 404 from double-prefixing.
+	baseURL := strings.TrimRight(serverDetails.GetArtifactoryUrl(), "/")
+	url := fmt.Sprintf("%s/%s/%s", baseURL, repoKey, artifactPath)
+
+	log.Debug(fmt.Sprintf("Fetching Artifactory artifact body: %s", url))
+
+	// Use the JFrog SDK's HTTP client (configured with proper auth from server details).
+	client, err := getHTTPClient(serverDetails)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create HTTP client: %w", err)
+	}
+
+	resp, err := client.Get(url)
+	if err != nil {
+		return nil, fmt.Errorf("HTTP GET failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("Artifactory returned status %d for %s", resp.StatusCode, url)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response body: %w", err)
+	}
+
+	log.Debug(fmt.Sprintf("Fetched %d bytes from Artifactory", len(body)))
+	return body, nil
+}
+
+// getHTTPClient constructs an authenticated HTTP client using credentials from JFrog server details.
+// Handles access token (Bearer), username/password, and anonymous authentication automatically.
+func getHTTPClient(serverDetails *config.ServerDetails) (*http.Client, error) {
+	var transport http.RoundTripper = &http.Transport{}
+
+	artifactoryURL := strings.TrimRight(serverDetails.GetArtifactoryUrl(), "/")
+	user := serverDetails.GetUser()
+	password := serverDetails.GetPassword()
+	accessToken := serverDetails.GetAccessToken()
+
+	if accessToken != "" {
+		// Access token auth: Bearer <token>
+		transport = &bearerTransport{
+			base:    transport,
+			token:   accessToken,
+			baseURL: artifactoryURL,
+		}
+	} else if user != "" && password != "" {
+		// Username/password auth: Basic <base64(user:password)>
+		creds := base64Encode([]byte(user + ":" + password))
+		transport = &basicTransport{
+			base:     transport,
+			creds:    creds,
+			baseURL:  artifactoryURL,
+		}
+	}
+
+	return &http.Client{Transport: transport}, nil
+}
+
+// bearerTransport adds Bearer token auth headers to requests against the configured base URL.
+type bearerTransport struct {
+	base    http.RoundTripper
+	token   string
+	baseURL string
+}
+
+func (t *bearerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if !strings.HasPrefix(req.URL.String(), t.baseURL) {
+		return t.base.RoundTrip(req) // Pass through non-matching URLs unchanged
+	}
+	req = cloneRequest(req)
+	req.Header.Set("Authorization", "Bearer "+t.token)
+	return t.base.RoundTrip(req)
+}
+
+// basicTransport adds Basic auth headers to requests against the configured base URL.
+type basicTransport struct {
+	base     http.RoundTripper
+	creds    string
+	baseURL  string
+}
+
+func (t *basicTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if !strings.HasPrefix(req.URL.String(), t.baseURL) {
+		return t.base.RoundTrip(req)
+	}
+	req = cloneRequest(req)
+	req.Header.Set("Authorization", "Basic "+t.creds)
+	return t.base.RoundTrip(req)
+}
+
+// cloneRequest creates a shallow copy of the request with cloned headers.
+func cloneRequest(req *http.Request) *http.Request {
+	reqCopy := new(http.Request)
+	*reqCopy = *req
+	reqCopy.Header = make(http.Header, len(req.Header))
+	for k, vals := range req.Header {
+		for _, v := range vals {
+			reqCopy.Header.Add(k, v)
+		}
+	}
+	return reqCopy
+}
+
+// base64Encode encodes bytes to a URL-safe base64 string (no padding).
+func base64Encode(data []byte) string {
+	encoded := make([]byte, base64EncodedLen(len(data)))
+	base64.StdEncoding.Encode(encoded, data)
+	return strings.TrimRight(string(encoded), "=") // Strip trailing = for JFrog compat
+}
+
+// base64EncodedLen returns the length of a base64-encoded string for the given input length.
+func base64EncodedLen(n int) int {
+	return ((n + 2) / 3) * 4
+}
+
 // queryXrayViolationsViaCLI queries the Xray Violations API for an artifact.
 // This is the correct endpoint for Docker image vulnerability queries (not SummaryService).
 func queryXrayViolationsViaCLI(serverId string, projectKey string, artifactPath string) ([]byte, error) {
@@ -213,33 +351,36 @@ func stripRepoPrefix(path string) string {
 }
 
 // xrayViolation represents the JSON structure from Xray Violations API.
+// Each violation corresponds to a single security issue (CVE, malicious package, license violation, etc.)
+// found in the scanned artifact. The MaliciousPackage field is extracted during initial query and passed
+// through to downstream code — no separate Events API calls are needed.
 type xrayViolation struct {
 	ViolationID          string      `json:"violation_id"`
 	Description          string      `json:"description"`
-	Severity             string      `json:"severity"`
-	Type                 string      `json:"type"`
-	IssueID              string      `json:"issue_id"`
+	Severity             string      `json:"severity"` // Low, Medium, High, Critical (or "Malicious" for malicious packages)
+	Type                 string      `json:"type"`     // Issue type: CVE, Malware, License, etc.
+	IssueID              string      `json:"issue_id"` // Xray issue ID (e.g., "XRAY-12345")
 	InfectedComponents   []string    `json:"infected_components"`
 	InfectedVersions     []string    `json:"infected_versions"`
 	FixVersions          []string    `json:"fix_versions,omitempty"`
 	Created              string      `json:"created"`
-	MaliciousPackage     bool        `json:"malicious_package,omitempty"`
-	Properties           interface{} `json:"properties,omitempty"` // Changed to interface{} for flexibility
+	MaliciousPackage     bool        `json:"malicious_package,omitempty"` // Key field — used for malicious detection without Events API calls
+	Properties           any       `json:"properties,omitempty"` // CVE data and other metadata stored as flat key-value pairs
 	ExtendedInformation  *xrayViolationInfo `json:"extended_information,omitempty"`
 }
 
 type xrayViolationInfo struct {
-	ShortDescription  string `json:"short_description"`
-	FullDescription   string `json:"full_description"`
+	ShortDescription      string `json:"short_description"`
+	FullDescription       string `json:"full_description"`
 	JFrogResearchSeverity string `json:"jfrog_research_severity,omitempty"`
 }
 
 // extractCwesFromProperties extracts CWE IDs from violation properties.
-func extractCwesFromProperties(props map[string]interface{}) []string {
+func extractCwesFromProperties(props map[string]any) []string {
 	var cwes []string
 	if cweRaw, ok := props["cwe"]; ok {
 		switch v := cweRaw.(type) {
-		case []interface{}:
+		case []any:
 			for _, c := range v {
 				if s, ok := c.(string); ok {
 					cwes = append(cwes, s)
@@ -252,16 +393,20 @@ func extractCwesFromProperties(props map[string]interface{}) []string {
 	return cwes
 }
 
-// violationWithMalicious wraps a services.Vulnerability with its malicious_package flag.
-// The Violations API already returns malicious_package on each violation, so we extract it
-// here instead of making separate Events API calls per issue ID (eliminating N+1 HTTP requests).
+// violationWithMalicious wraps a xrayServices.Vulnerability with its malicious_package flag.
+// The Violations API already returns malicious_package on each violation, so we extract it here
+// instead of making separate Events API calls per issue ID (eliminating N+1 HTTP requests).
 type violationWithMalicious struct {
-	Vulnerability  services.Vulnerability
+	Vulnerability    xrayServices.Vulnerability
 	MaliciousPackage bool
 }
 
 // queryXrayViolationsViaCLIVulnerabilitiesWithMalicious queries Xray Violations API and returns
 // vulnerabilities alongside their malicious_package status from the same response.
+//
+// This is the primary entry point for Docker image vulnerability queries. It extracts both
+// vulnerability data AND malicious_package status in a single HTTP request, eliminating the need
+// for separate Events API calls per issue ID (which previously caused N+1 HTTP requests).
 func queryXrayViolationsViaCLIVulnerabilitiesWithMalicious(serverId, projectKey, artifactPath string) ([]violationWithMalicious, error) {
 	body, err := queryXrayViolationsViaCLI(serverId, projectKey, artifactPath)
 	if err != nil {
@@ -282,7 +427,7 @@ func queryXrayViolationsViaCLIVulnerabilitiesWithMalicious(serverId, projectKey,
 
 	var results []violationWithMalicious
 	for _, v := range resp.Violations {
-		vuln := services.Vulnerability{
+		vuln := xrayServices.Vulnerability{
 			IssueId:    v.IssueID,
 			Summary:    v.Description,
 			Severity:   v.Severity,
@@ -293,18 +438,18 @@ func queryXrayViolationsViaCLIVulnerabilitiesWithMalicious(serverId, projectKey,
 		if v.Properties != nil {
 			if propsMap, ok := v.Properties.(map[string]interface{}); ok {
 				if cveId, ok := propsMap["cve"].(string); ok && cveId != "" {
-					cve := services.Cve{
+					cve := xrayServices.Cve{
 						Id:   cveId,
 						Cwe:  extractCwesFromProperties(propsMap),
 					}
-					vuln.Cves = []services.Cve{cve}
+					vuln.Cves = []xrayServices.Cve{cve}
 				}
 			}
 		}
 
 		// Preserve detailed information for rich reporting
 		if v.ExtendedInformation != nil {
-			vuln.ExtendedInformation = &services.ExtendedInformation{
+			vuln.ExtendedInformation = &xrayServices.ExtendedInformation{
 				FullDescription: v.ExtendedInformation.FullDescription,
 			}
 		}
