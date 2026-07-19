@@ -94,34 +94,6 @@ func queryXrayViaCLI(serverId string, paths []string, checksums []string) (*xray
 	return &result, nil
 }
 
-// queryXrayEventsViaCLI queries the Events API for malicious package detection using CLI.
-func queryXrayEventsViaCLI(serverId string, issueId string) (bool, error) {
-	if issueId == "" {
-		return false, nil
-	}
-
-	log.Debug(fmt.Sprintf("Querying Events API via CLI for %s", issueId))
-
-	args := []string{"xr", "curl", "-XGET", fmt.Sprintf("/api/v2/events/%s", issueId)}
-	output, err := runJFCmd(serverId, args)
-	if err != nil {
-		log.Debug(fmt.Sprintf("Events query failed: %v", err))
-		return false, fmt.Errorf("events query failed: %w", err)
-	}
-
-	var issueData map[string]interface{}
-	if err := json.Unmarshal(output, &issueData); err != nil {
-		return false, fmt.Errorf("failed to parse events output: %w", err)
-	}
-
-	malicious, found := issueData["malicious_package"].(bool)
-	if !found {
-		log.Debug(fmt.Sprintf("malicious_package field not found in Events response"))
-		return false, nil
-	}
-
-	return malicious, nil
-}
 
 // queryXraySearchViaCLI queries Xray artifact search API using CLI.
 func queryXraySearchViaCLI(serverId string, query string) ([]byte, error) {
@@ -240,65 +212,6 @@ func stripRepoPrefix(path string) string {
 	return path // No slash means no repo to strip
 }
 
-// queryXrayViolationsViaCLIVulnerabilities queries Xray Violations API and converts to services.Vulnerability format.
-func queryXrayViolationsViaCLIVulnerabilities(serverId, projectKey, artifactPath string) ([]services.Vulnerability, error) {
-	body, err := queryXrayViolationsViaCLI(serverId, projectKey, artifactPath)
-	if err != nil {
-		return nil, err
-	}
-
-	type violationResponse struct {
-		TotalViolations int             `json:"total_violations"`
-		Violations      []xrayViolation `json:"violations"`
-	}
-
-	var resp violationResponse
-	if err := json.Unmarshal(body, &resp); err != nil {
-		return nil, fmt.Errorf("failed to parse violations response: %w", err)
-	}
-
-	log.Info(fmt.Sprintf("Found %d violations for artifact", resp.TotalViolations))
-
-	var vulns []services.Vulnerability
-	for _, v := range resp.Violations {
-		vuln := services.Vulnerability{
-			IssueId:    v.IssueID,
-			Summary:    v.Description,
-			Severity:   v.Severity,
-			Technology: v.Type, // Store type in Technology field
-		}
-
-		// Extract CVE info from properties if present
-		if v.Properties != nil {
-			if propsMap, ok := v.Properties.(map[string]interface{}); ok {
-				if cveId, ok := propsMap["cve"].(string); ok && cveId != "" {
-					cve := services.Cve{
-						Id:   cveId,
-						Cwe:  extractCwesFromProperties(propsMap),
-					}
-					vuln.Cves = []services.Cve{cve}
-				}
-			}
-		}
-
-		// Preserve detailed information for rich reporting
-		if v.ExtendedInformation != nil {
-			vuln.ExtendedInformation = &services.ExtendedInformation{
-				FullDescription: v.ExtendedInformation.FullDescription,
-			}
-		}
-
-		// Extract fix versions if available
-		if len(v.FixVersions) > 0 {
-			log.Debug(fmt.Sprintf("Issue %s has fix versions: %v", v.IssueID, v.FixVersions))
-		}
-
-		vulns = append(vulns, vuln)
-	}
-
-	return vulns, nil
-}
-
 // xrayViolation represents the JSON structure from Xray Violations API.
 type xrayViolation struct {
 	ViolationID          string      `json:"violation_id"`
@@ -337,4 +250,70 @@ func extractCwesFromProperties(props map[string]interface{}) []string {
 		}
 	}
 	return cwes
+}
+
+// violationWithMalicious wraps a services.Vulnerability with its malicious_package flag.
+// The Violations API already returns malicious_package on each violation, so we extract it
+// here instead of making separate Events API calls per issue ID (eliminating N+1 HTTP requests).
+type violationWithMalicious struct {
+	Vulnerability  services.Vulnerability
+	MaliciousPackage bool
+}
+
+// queryXrayViolationsViaCLIVulnerabilitiesWithMalicious queries Xray Violations API and returns
+// vulnerabilities alongside their malicious_package status from the same response.
+func queryXrayViolationsViaCLIVulnerabilitiesWithMalicious(serverId, projectKey, artifactPath string) ([]violationWithMalicious, error) {
+	body, err := queryXrayViolationsViaCLI(serverId, projectKey, artifactPath)
+	if err != nil {
+		return nil, err
+	}
+
+	type violationResponse struct {
+		TotalViolations int             `json:"total_violations"`
+		Violations      []xrayViolation `json:"violations"`
+	}
+
+	var resp violationResponse
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, fmt.Errorf("failed to parse violations response: %w", err)
+	}
+
+	log.Info(fmt.Sprintf("Found %d violations for artifact", resp.TotalViolations))
+
+	var results []violationWithMalicious
+	for _, v := range resp.Violations {
+		vuln := services.Vulnerability{
+			IssueId:    v.IssueID,
+			Summary:    v.Description,
+			Severity:   v.Severity,
+			Technology: v.Type, // Store type in Technology field
+		}
+
+		// Extract CVE info from properties if present
+		if v.Properties != nil {
+			if propsMap, ok := v.Properties.(map[string]interface{}); ok {
+				if cveId, ok := propsMap["cve"].(string); ok && cveId != "" {
+					cve := services.Cve{
+						Id:   cveId,
+						Cwe:  extractCwesFromProperties(propsMap),
+					}
+					vuln.Cves = []services.Cve{cve}
+				}
+			}
+		}
+
+		// Preserve detailed information for rich reporting
+		if v.ExtendedInformation != nil {
+			vuln.ExtendedInformation = &services.ExtendedInformation{
+				FullDescription: v.ExtendedInformation.FullDescription,
+			}
+		}
+
+		results = append(results, violationWithMalicious{
+			Vulnerability:  vuln,
+			MaliciousPackage: v.MaliciousPackage,
+		})
+	}
+
+	return results, nil
 }

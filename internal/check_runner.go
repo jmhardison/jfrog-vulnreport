@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/jfrog/jfrog-cli-core/v2/plugins/components"
@@ -87,14 +86,15 @@ func RunCheckCommand(c *components.Context) error {
 		return fmt.Errorf("failed to setup Artifactory connection: %w", err)
 	}
 
-	// Generate vulnerability report (all Xray queries use CLI wrappers in internal/xray_cli.go)
-	report, err := generateVulnerabilityReport(conf, rtManager, repoKey, imageName, tag)
+	// Generate vulnerability report (all Xray queries use CLI wrappers in internal/xray_cli.go).
+	// The malicious lookup map is populated from the Violations API response, eliminating N+1 Events API calls.
+	report, maliciousLookup, err := generateVulnerabilityReport(conf, rtManager, repoKey, imageName, tag)
 	if err != nil {
 		return fmt.Errorf("failed to generate vulnerability report: %w", err)
 	}
 
 	// Output the report
-	if err := outputReport(conf.ServerId, report, conf.Output, conf.MinSeverity, conf.ShowFindings); err != nil {
+	if err := outputReport(conf.ServerId, report, maliciousLookup, conf.Output, conf.MinSeverity, conf.ShowFindings); err != nil {
 		return fmt.Errorf("failed to output report: %w", err)
 	}
 
@@ -136,56 +136,6 @@ func extractIssueType(vuln services.Vulnerability) string {
 	return "Security" // Default
 }
 
-// checkMaliciousPackage queries the JFrog Events API to check if an issue is malicious.
-// Always uses CLI-based approach since direct SDK access fails due to JWT audience restrictions.
-func checkMaliciousPackage(serverId string, issueId string) (bool, error) {
-	if issueId == "" {
-		return false, nil
-	}
-
-	isMalicious, err := checkMaliciousPackageCLI(serverId, issueId)
-	if err != nil {
-		log.Debug(fmt.Sprintf("CLI Events API failed for %s: %v", issueId, err))
-		return false, err
-	}
-
-	return isMalicious, nil
-}
-
-// isMaliciousWithCache checks if an issue is malicious using Events API with caching.
-var maliciousCache = make(map[string]bool)
-var maliciousCacheMutex sync.RWMutex
-
-func isMaliciousWithCache(serverId string, issueId string) bool {
-	if issueId == "" {
-		return false
-	}
-
-	// Check cache first
-	maliciousCacheMutex.RLock()
-	if cached, exists := maliciousCache[issueId]; exists {
-		maliciousCacheMutex.RUnlock()
-		return cached
-	}
-	maliciousCacheMutex.RUnlock()
-
-	isMalicious, err := checkMaliciousPackage(serverId, issueId)
-	if err != nil {
-		log.Debug(fmt.Sprintf("Events API error for %s: %v", issueId, err))
-		return false
-	}
-
-	if isMalicious {
-		log.Info(fmt.Sprintf("🚨 Events API confirmed malicious package: %s", issueId))
-	}
-
-	// Cache the result
-	maliciousCacheMutex.Lock()
-	maliciousCache[issueId] = isMalicious
-	maliciousCacheMutex.Unlock()
-
-	return isMalicious
-}
 
 // getSeverityIcon returns an appropriate icon for severity levels
 func getSeverityIcon(severity string) string {
@@ -215,195 +165,23 @@ func min(a, b int) int {
 
 // getArtifactSummaryVulnerabilitiesCLI queries Xray Violations API using JFrog CLI subprocess to bypass JWT audience restrictions.
 // Replaced SummaryService (/api/v1/summary/artifact) which hangs indefinitely for Docker images with Violations API (/api/v1/violations).
-func getArtifactSummaryVulnerabilitiesCLI(serverId, projectKey, artifactPath string) ([]services.Vulnerability, error) {
+// Returns violations alongside their malicious_package status from the same response (no separate Events API calls needed).
+func getArtifactSummaryVulnerabilitiesCLI(serverId, projectKey, artifactPath string) ([]violationWithMalicious, error) {
 	log.Info(fmt.Sprintf("Querying Xray Violations API via CLI for path: %s (project: %s)", artifactPath, projectKey))
 
-	// Use the correct Violations API endpoint instead of SummaryService (which hangs for Docker images)
-	vulns, err := queryXrayViolationsViaCLIVulnerabilities(serverId, projectKey, artifactPath)
+	// Use the correct Violations API endpoint instead of SummaryService (which hangs for Docker images).
+	// The Violations response already includes malicious_package per violation, eliminating N+1 Events API calls.
+	results, err := queryXrayViolationsViaCLIVulnerabilitiesWithMalicious(serverId, projectKey, artifactPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query Xray Violations API via CLI: %w", err)
 	}
 
-	log.Info(fmt.Sprintf("Extracted %d vulnerabilities from Violations API response", len(vulns)))
-	return vulns, nil
+	log.Info(fmt.Sprintf("Extracted %d violations from Violations API response (malicious status included)", len(results)))
+	return results, nil
 }
 
-// convertCLICvesToCves converts CVEs from CLI format to SDK Vulnerability.Cves format
-func convertCLICvesToCves(cliCves []xrayCve) []services.Cve {
-	var cves []services.Cve
-	for _, cc := range cliCves {
-		cve := services.Cve{
-			Id:          cc.Id,
-			CvssV2Score: cc.CvssV2Score,
-			CvssV3Score: cc.CvssV3Score,
-			Cwe:         cc.Cwe,
-		}
-		cves = append(cves, cve)
-	}
-	return cves
-}
 
-// checkMaliciousPackageCLI checks if an issue is malicious using JFrog CLI Events API.
-func checkMaliciousPackageCLI(serverId string, issueId string) (bool, error) {
-	if issueId == "" {
-		return false, nil
-	}
-
-	isMalicious, err := queryXrayEventsViaCLI(serverId, issueId)
-	if err != nil {
-		log.Debug(fmt.Sprintf("Failed to query Events API via CLI for %s: %v", issueId, err))
-		return false, err
-	}
-
-	if isMalicious {
-		log.Info(fmt.Sprintf("🚨 JFrog CLI confirmed malicious package: %s", issueId))
-	}
-
-	return isMalicious, nil
-}
-
-// parseMaliciousPackageFromEventsResponse extracts malicious package status from Events API response.
-func parseMaliciousPackageFromEventsResponse(body []byte) (isMalicious bool, foundField bool, err error) {
-	var payload interface{}
-	if err := json.Unmarshal(body, &payload); err != nil {
-		return false, false, err
-	}
-
-	values := findMaliciousPackageFields(payload)
-	if len(values) == 0 {
-		return false, false, nil
-	}
-	for _, value := range values {
-		if value {
-			return true, true, nil
-		}
-	}
-	return false, true, nil
-}
-
-func findMaliciousPackageFields(v interface{}) []bool {
-	var values []bool
-	switch typed := v.(type) {
-	case map[string]interface{}:
-		if raw, ok := typed["malicious_package"]; ok {
-			if malicious, ok := parseBooleanLike(raw); ok {
-				values = append(values, malicious)
-			}
-		}
-		for _, nested := range typed {
-			values = append(values, findMaliciousPackageFields(nested)...)
-		}
-	case []interface{}:
-		for _, nested := range typed {
-			values = append(values, findMaliciousPackageFields(nested)...)
-		}
-	}
-	return values
-}
-
-func parseBooleanLike(value interface{}) (bool, bool) {
-	switch typed := value.(type) {
-	case bool:
-		return typed, true
-	case string:
-		normalized := strings.TrimSpace(strings.ToLower(typed))
-		if normalized == "true" || normalized == "1" || normalized == "yes" {
-			return true, true
-		}
-		if normalized == "false" || normalized == "0" || normalized == "no" {
-			return false, true
-		}
-	case float64:
-		if typed == 1 {
-			return true, true
-		}
-		if typed == 0 {
-			return false, true
-		}
-	}
-	return false, false
-}
-
-func collectUniqueIssueIDs(report *VulnerabilityReport) []string {
-	issueIDSet := make(map[string]struct{})
-	for _, platform := range report.Platforms {
-		for _, vuln := range platform.Vulnerabilities {
-			if vuln.IssueId == "" {
-				continue
-			}
-			issueIDSet[vuln.IssueId] = struct{}{}
-		}
-	}
-
-	issueIDs := make([]string, 0, len(issueIDSet))
-	for issueID := range issueIDSet {
-		issueIDs = append(issueIDs, issueID)
-	}
-	return issueIDs
-}
-
-// prefetchMaliciousStatuses queries the Events API for all unique issue IDs concurrently.
-// This batches what would otherwise be N sequential HTTP calls into parallel requests.
-func prefetchMaliciousStatuses(serverId string, issueIDs []string) {
-	var wg sync.WaitGroup
-
-	for _, issueID := range issueIDs {
-		if issueID == "" {
-			continue
-		}
-
-		maliciousCacheMutex.RLock()
-		_, exists := maliciousCache[issueID]
-		maliciousCacheMutex.RUnlock()
-
-		if !exists {
-			wg.Add(1)
-			go func(id string) {
-				defer wg.Done()
-				isMalicious, err := checkMaliciousPackage(serverId, id)
-				if err != nil {
-					log.Debug(fmt.Sprintf("Events API error for %s: %v", id, err))
-					return
-				}
-
-				if isMalicious {
-					log.Info(fmt.Sprintf("🚨 Events API confirmed malicious package: %s", id))
-				}
-
-				maliciousCacheMutex.Lock()
-				maliciousCache[id] = isMalicious
-				maliciousCacheMutex.Unlock()
-			}(issueID)
-		}
-	}
-
-	wg.Wait()
-}
-
-// countMaliciousIssuesFromEvents queries the Events API for malicious package detection.
-// Uses concurrent prefetching to batch sequential HTTP calls into parallel requests.
-func countMaliciousIssuesFromEvents(serverId string, issueIDs []string) int {
-	if len(issueIDs) == 0 {
-		return 0
-	}
-
-	// First, prefetch all unique statuses concurrently (batches N sequential HTTP calls into parallel)
-	prefetchMaliciousStatuses(serverId, issueIDs)
-
-	// Then count cached results (fast — no more HTTP calls needed)
-	count := 0
-	for _, issueID := range issueIDs {
-		maliciousCacheMutex.RLock()
-		if maliciousCache[issueID] {
-			count++
-		}
-		maliciousCacheMutex.RUnlock()
-	}
-
-	return count
-}
-
-func filterVulnerabilitiesBySeverity(vulnerabilities []services.Vulnerability, minSeverity string, serverId string) []services.Vulnerability {
+func filterVulnerabilitiesBySeverity(vulnerabilities []services.Vulnerability, minSeverity string, maliciousLookup map[string]bool) []services.Vulnerability {
 	if minSeverity == "" {
 		return vulnerabilities
 	}
@@ -429,9 +207,10 @@ func filterVulnerabilitiesBySeverity(vulnerabilities []services.Vulnerability, m
 			vulnLevel = level
 		}
 
-		// Special case: if filtering for "Malicious", only show malicious content
+		// Special case: if filtering for "Malicious", only show malicious content.
+		// Uses pre-built lookup map (no Events API calls needed).
 		if minSeverity == "Malicious" {
-			if isMaliciousWithCache(serverId, vuln.IssueId) {
+			if maliciousLookup[vuln.IssueId] {
 				filtered = append(filtered, vuln)
 			}
 		} else if vulnLevel >= minLevel {
@@ -442,8 +221,8 @@ func filterVulnerabilitiesBySeverity(vulnerabilities []services.Vulnerability, m
 	return filtered
 }
 
-// generateSecurityBanner creates a visual banner based on the security status of findings
-func generateSecurityBanner(serverId string, report *VulnerabilityReport, minSeverity string) {
+// generateSecurityBanner creates a visual banner based on the security status of findings.
+func generateSecurityBanner(report *VulnerabilityReport, maliciousLookup map[string]bool, minSeverity string) {
 	// Deduplicate vulnerabilities to analyze the actual findings
 	vulnMap := make(map[string]services.Vulnerability)
 	for _, platform := range report.Platforms {
@@ -460,19 +239,19 @@ func generateSecurityBanner(serverId string, report *VulnerabilityReport, minSev
 		allVulns = append(allVulns, vuln)
 	}
 
-	// Apply the same filtering logic used for display
+	// Apply the same filtering logic used for display (uses pre-built malicious lookup instead of Events API).
 	filteredVulns := allVulns
 	if minSeverity != "" {
-		filteredVulns = filterVulnerabilitiesBySeverity(filteredVulns, minSeverity, serverId)
+		filteredVulns = filterVulnerabilitiesBySeverity(filteredVulns, minSeverity, maliciousLookup)
 	}
 
 	// Determine banner type based on filtered findings
 	hasMalicious := false
 	hasFindings := len(filteredVulns) > 0
 
-	// Check for malicious content in filtered results
+	// Check for malicious content in filtered results using pre-built lookup (no HTTP calls).
 	for _, vuln := range filteredVulns {
-		if isMaliciousWithCache(serverId, vuln.IssueId) {
+		if maliciousLookup[vuln.IssueId] {
 			hasMalicious = true
 			break
 		}
@@ -519,20 +298,20 @@ func generateSecurityBanner(serverId string, report *VulnerabilityReport, minSev
 }
 
 
-func outputReport(serverId string, report *VulnerabilityReport, output string, minSeverity string, showFindings bool) error {
+func outputReport(serverId string, report *VulnerabilityReport, maliciousLookup map[string]bool, output string, minSeverity string, showFindings bool) error {
 	switch output {
 	case "json":
-		return outputJSONReport(serverId, report)
+		return outputJSONReport(report, maliciousLookup)
 	case "github-md":
-		return outputMarkdownReport(serverId, report, minSeverity, showFindings)
+		return outputMarkdownReport(report, maliciousLookup, minSeverity, showFindings)
 	default:
 		return fmt.Errorf("unsupported output format: %s. Use 'json' or 'github-md'", output)
 	}
 }
 
-func outputJSONReport(serverId string, report *VulnerabilityReport) error {
-	// Convert to enhanced format
-	enhanced := convertToEnhancedReport(serverId, report)
+func outputJSONReport(report *VulnerabilityReport, maliciousLookup map[string]bool) error {
+	// Convert to enhanced format using pre-built malicious lookup (no Events API calls needed).
+	enhanced := convertToEnhancedReport(report, maliciousLookup)
 
 	jsonData, err := json.MarshalIndent(enhanced, "", "  ")
 	if err != nil {
@@ -543,11 +322,10 @@ func outputJSONReport(serverId string, report *VulnerabilityReport) error {
 	return nil
 }
 
-func convertToEnhancedReport(serverId string, report *VulnerabilityReport) *EnhancedVulnerabilityReport {
+func convertToEnhancedReport(report *VulnerabilityReport, maliciousLookup map[string]bool) *EnhancedVulnerabilityReport {
 
 	typeCount := make(map[string]int)
-	issueIDs := collectUniqueIssueIDs(report)
-	maliciousCount := countMaliciousIssuesFromEvents(serverId, issueIDs)
+	maliciousCount := 0
 
 	var platforms []EnhancedPlatformInfo
 
@@ -561,7 +339,10 @@ func convertToEnhancedReport(serverId string, report *VulnerabilityReport) *Enha
 			}
 			typeCount[issueType]++
 
-			malicious := isMaliciousWithCache(serverId, vuln.IssueId)
+			malicious := maliciousLookup[vuln.IssueId]
+			if malicious {
+				maliciousCount++
+			}
 
 			finding := CompactFinding{
 				IssueId:   vuln.IssueId,
@@ -600,7 +381,7 @@ func convertToEnhancedReport(serverId string, report *VulnerabilityReport) *Enha
 	}
 }
 
-func outputMarkdownReport(serverId string, report *VulnerabilityReport, minSeverity string, showFindings bool) error {
+func outputMarkdownReport(report *VulnerabilityReport, maliciousLookup map[string]bool, minSeverity string, showFindings bool) error {
 	// For GitHub MD output, suppress verbose logging and banners for silent operation
 	silent := true
 
@@ -608,7 +389,7 @@ func outputMarkdownReport(serverId string, report *VulnerabilityReport, minSever
 
 	// Only generate banner if not in silent mode (for CI/CD pipelines)
 	if !silent {
-		generateSecurityBanner(serverId, report, minSeverity)
+		generateSecurityBanner(report, maliciousLookup, minSeverity)
 	}
 
 	// Security Summary with counts
@@ -616,7 +397,6 @@ func outputMarkdownReport(serverId string, report *VulnerabilityReport, minSever
 
 	// Deduplicate vulnerabilities across all platforms for accurate counting and display
 	vulnMap := make(map[string]services.Vulnerability)
-	typeCount := make(map[string]int)
 
 	for _, platform := range report.Platforms {
 		for _, vuln := range platform.Vulnerabilities {
@@ -626,11 +406,15 @@ func outputMarkdownReport(serverId string, report *VulnerabilityReport, minSever
 			}
 		}
 	}
-	issueIDs := make([]string, 0, len(vulnMap))
-	for issueID := range vulnMap {
-		issueIDs = append(issueIDs, issueID)
+
+	maliciousCount := 0
+	for issueID, malicious := range maliciousLookup {
+		if _, exists := vulnMap[issueID]; exists && malicious {
+			maliciousCount++
+		}
 	}
-	maliciousCount := countMaliciousIssuesFromEvents(serverId, issueIDs)
+
+	typeCount := make(map[string]int)
 
 	// Now count the unique vulnerabilities
 	for _, vuln := range vulnMap {
@@ -669,7 +453,7 @@ func outputMarkdownReport(serverId string, report *VulnerabilityReport, minSever
 
 			// Apply severity filtering
 			if minSeverity != "" {
-				filteredVulns = filterVulnerabilitiesBySeverity(filteredVulns, minSeverity, serverId)
+				filteredVulns = filterVulnerabilitiesBySeverity(filteredVulns, minSeverity, maliciousLookup)
 			}
 
 			fmt.Println("## Security Findings")
@@ -700,7 +484,7 @@ func outputMarkdownReport(serverId string, report *VulnerabilityReport, minSever
 					}
 
 					maliciousIcon := "❌"
-					if isMaliciousWithCache(serverId, vuln.IssueId) {
+					if maliciousLookup[vuln.IssueId] {
 						maliciousIcon = "🚨"
 					}
 
@@ -793,7 +577,7 @@ func getXrayServiceURL(serverDetails *config.ServerDetails) string {
 }
 
 
-func generateVulnerabilityReport(conf *CheckConfiguration, rtManager artifactory.ArtifactoryServicesManager, repoKey, imageName, tag string) (*VulnerabilityReport, error) {
+func generateVulnerabilityReport(conf *CheckConfiguration, rtManager artifactory.ArtifactoryServicesManager, repoKey, imageName, tag string) (*VulnerabilityReport, map[string]bool, error) {
 	if !conf.Silent {
 		log.Info(fmt.Sprintf("Generating vulnerability report for %s/%s:%s", repoKey, imageName, tag))
 	}
@@ -810,14 +594,14 @@ func generateVulnerabilityReport(conf *CheckConfiguration, rtManager artifactory
 	}
 	platformPaths, err := discoverImageArtifacts(conf.ServerId, repoKey, imageName, tag)
 	if err != nil {
-		return nil, fmt.Errorf("manifest discovery failed: %w", err)
+		return nil, nil, fmt.Errorf("manifest discovery failed: %w", err)
 	}
 
 	if len(platformPaths) == 0 {
 		if !conf.Silent {
 			log.Warn("No artifacts discovered — image may not be indexed in Xray or may use an unexpected path format")
 		}
-		return report, nil
+		return report, map[string]bool{}, nil
 	}
 
 	if !conf.Silent {
@@ -843,13 +627,17 @@ func generateVulnerabilityReport(conf *CheckConfiguration, rtManager artifactory
 			if !conf.Silent {
 				log.Warn(fmt.Sprintf("No platforms match filter (arch=%q, os=%q)", arch, conf.OS))
 			}
-			return report, nil
+			return report, map[string]bool{}, nil
 		}
 		platformPaths = filtered
 		if !conf.Silent {
 			log.Info(fmt.Sprintf("After platform/OS filtering: %d path(s) remaining", len(platformPaths)))
 		}
 	}
+
+	// maliciousLookup maps issue ID to whether it is a malicious package.
+	// Populated from the Violations API response (no separate Events API calls needed).
+	maliciousLookup := make(map[string]bool)
 
 	// Step 3: Query vulnerabilities for each platform path
 	vulnMap := make(map[string]services.Vulnerability)
@@ -861,15 +649,15 @@ func generateVulnerabilityReport(conf *CheckConfiguration, rtManager artifactory
 			log.Info(fmt.Sprintf("Querying Xray for: %s (digests: %v)", dp.path, dp.digests))
 		}
 
-		var vulns []services.Vulnerability
+		var results []violationWithMalicious
 		var err error
 
 		if len(dp.digests) > 0 {
 			// Multi-platform or single-platform with digest — query by checksum (checksums now ignored, path is primary key for Violations API)
-			vulns, err = getArtifactSummaryVulnerabilitiesCLI(conf.ServerId, conf.ProjectKey, dp.path)
+			results, err = getArtifactSummaryVulnerabilitiesCLI(conf.ServerId, conf.ProjectKey, dp.path)
 		} else {
 			// Single-platform without explicit digest — query by path only
-			vulns, err = getArtifactSummaryVulnerabilitiesCLI(conf.ServerId, conf.ProjectKey, dp.path)
+			results, err = getArtifactSummaryVulnerabilitiesCLI(conf.ServerId, conf.ProjectKey, dp.path)
 		}
 
 		if err != nil {
@@ -877,11 +665,12 @@ func generateVulnerabilityReport(conf *CheckConfiguration, rtManager artifactory
 			continue
 		}
 
-		if len(vulns) > 0 {
+		if len(results) > 0 {
 			beforeCount := len(vulnMap)
-			for _, vuln := range vulns {
-				if vuln.IssueId != "" {
-					vulnMap[vuln.IssueId] = vuln
+			for _, r := range results {
+				if r.Vulnerability.IssueId != "" {
+					vulnMap[r.Vulnerability.IssueId] = r.Vulnerability
+					maliciousLookup[r.Vulnerability.IssueId] = r.MaliciousPackage
 				}
 			}
 			newUnique := len(vulnMap) - beforeCount
@@ -891,7 +680,13 @@ func generateVulnerabilityReport(conf *CheckConfiguration, rtManager artifactory
 			}
 
 			log.Info(fmt.Sprintf("Found %d vulnerabilities at path: %s (new unique: %d)",
-				len(vulns), dp.path, newUnique))
+				len(results), dp.path, newUnique))
+
+			// Build platform-specific vulnerability group — extract plain Vulnerabilities for report storage.
+			var vulns []services.Vulnerability
+			for _, r := range results {
+				vulns = append(vulns, r.Vulnerability)
+			}
 
 			// Build platform-specific vulnerability group
 			platformInfo := PlatformVulnerabilityInfo{
@@ -904,7 +699,7 @@ func generateVulnerabilityReport(conf *CheckConfiguration, rtManager artifactory
 			}
 
 			report.Platforms = append(report.Platforms, platformInfo)
-			totalVulnsAcrossPlatforms += len(vulns)
+			totalVulnsAcrossPlatforms += len(results)
 		}
 	}
 
@@ -934,5 +729,5 @@ func generateVulnerabilityReport(conf *CheckConfiguration, rtManager artifactory
 		}
 	}
 
-	return report, nil
+	return report, maliciousLookup, nil
 }

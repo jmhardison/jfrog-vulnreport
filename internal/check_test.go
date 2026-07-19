@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/jfrog/jfrog-cli-core/v2/utils/config"
@@ -193,7 +194,8 @@ func TestFilterVulnerabilitiesBySeverity(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			filtered := filterVulnerabilitiesBySeverity(vulnerabilities, tt.minSeverity, "test-server")
+			maliciousLookup := map[string]bool{}
+			filtered := filterVulnerabilitiesBySeverity(vulnerabilities, tt.minSeverity, maliciousLookup)
 			assert.Equal(t, tt.expectedCount, len(filtered))
 		})
 	}
@@ -352,53 +354,86 @@ func TestBuildXrayAPIEndpoint(t *testing.T) {
 	)
 }
 
-func TestParseMaliciousPackageFromEventsResponse(t *testing.T) {
-	t.Run("top-level malicious true", func(t *testing.T) {
-		isMalicious, found, err := parseMaliciousPackageFromEventsResponse([]byte(`{"issue_id":"XRAY-1","malicious_package":true}`))
-		assert.NoError(t, err)
-		assert.True(t, found)
-		assert.True(t, isMalicious)
-	})
+func TestFilterVulnerabilitiesBySeverityWithMaliciousLookup(t *testing.T) {
+	vulnerabilities := []services.Vulnerability{
+		{IssueId: "XRAY-1", Severity: "Low"},
+		{IssueId: "XRAY-2", Severity: "Medium"},
+		{IssueId: "XRAY-3", Severity: "High"},
+		{IssueId: "XRAY-4", Severity: "Critical"},
+	}
 
-	t.Run("nested malicious true", func(t *testing.T) {
-		isMalicious, found, err := parseMaliciousPackageFromEventsResponse([]byte(`{"data":{"event":{"malicious_package":true}}}`))
-		assert.NoError(t, err)
-		assert.True(t, found)
-		assert.True(t, isMalicious)
-	})
+	maliciousLookup := map[string]bool{
+		"XRAY-1": false,
+		"XRAY-2": true,
+		"XRAY-3": false,
+		"XRAY-4": true,
+	}
 
-	t.Run("malicious false", func(t *testing.T) {
-		isMalicious, found, err := parseMaliciousPackageFromEventsResponse([]byte(`{"malicious_package":false}`))
-		assert.NoError(t, err)
-		assert.True(t, found)
-		assert.False(t, isMalicious)
-	})
+	tests := []struct {
+		name          string
+		minSeverity   string
+		expectedCount int
+	}{
+		{
+			name:          "No filter",
+			minSeverity:   "",
+			expectedCount: 4,
+		},
+		{
+			name:          "Filter by Medium severity",
+			minSeverity:   "Medium",
+			expectedCount: 3, // Medium, High, Critical
+		},
+		{
+			name:          "Filter by Malicious severity — uses lookup map (no Events API)",
+			minSeverity:   "Malicious",
+			expectedCount: 2, // Only XRAY-2 and XRAY-4 are malicious
+		},
+	}
 
-	t.Run("any true across response", func(t *testing.T) {
-		isMalicious, found, err := parseMaliciousPackageFromEventsResponse([]byte(`{"items":[{"malicious_package":false},{"malicious_package":true}]}`))
-		assert.NoError(t, err)
-		assert.True(t, found)
-		assert.True(t, isMalicious)
-	})
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			filtered := filterVulnerabilitiesBySeverity(vulnerabilities, tt.minSeverity, maliciousLookup)
+			assert.Equal(t, tt.expectedCount, len(filtered))
+		})
+	}
+}
 
-	t.Run("string true value", func(t *testing.T) {
-		isMalicious, found, err := parseMaliciousPackageFromEventsResponse([]byte(`{"malicious_package":"true"}`))
-		assert.NoError(t, err)
-		assert.True(t, found)
-		assert.True(t, isMalicious)
-	})
+func TestViolationWithMaliciousExtractsFromResponse(t *testing.T) {
+	// Verify that the Violations API response parsing preserves malicious_package status.
+	// This is the key optimization: malicious detection now comes from a single Violations API
+	// call instead of N+1 Events API calls (one per issue ID).
+	respBody := []byte(`{
+		"total_violations": 2,
+		"violations": [
+			{
+				"violation_id": "V-001",
+				"description": "Test vuln A",
+				"severity": "High",
+				"type": "CVE",
+				"issue_id": "XRAY-100",
+				"malicious_package": true
+			},
+			{
+				"violation_id": "V-002",
+				"description": "Test vuln B",
+				"severity": "Medium",
+				"type": "CVE",
+				"issue_id": "XRAY-101",
+				"malicious_package": false
+			}
+		]
+	}`)
 
-	t.Run("numeric one value", func(t *testing.T) {
-		isMalicious, found, err := parseMaliciousPackageFromEventsResponse([]byte(`{"malicious_package":1}`))
-		assert.NoError(t, err)
-		assert.True(t, found)
-		assert.True(t, isMalicious)
-	})
+	type violationResponse struct {
+		TotalViolations int    `json:"total_violations"`
+		Violations      []xrayViolation `json:"violations"`
+	}
+	var resp violationResponse
+	err := json.Unmarshal(respBody, &resp)
+	assert.NoError(t, err)
 
-	t.Run("field missing", func(t *testing.T) {
-		isMalicious, found, err := parseMaliciousPackageFromEventsResponse([]byte(`{"issue_id":"XRAY-1"}`))
-		assert.NoError(t, err)
-		assert.False(t, found)
-		assert.False(t, isMalicious)
-	})
+	assert.Equal(t, 2, resp.TotalViolations)
+	assert.True(t, resp.Violations[0].MaliciousPackage, "XRAY-100 should be marked malicious")
+	assert.False(t, resp.Violations[1].MaliciousPackage, "XRAY-101 should not be marked malicious")
 }
