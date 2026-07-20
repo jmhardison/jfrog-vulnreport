@@ -23,54 +23,6 @@ const (
 	MediaTypeOCIIndex     = "application/vnd.oci.image.index.v1+json"
 )
 
-const (
-	violationTypeSecurity        = "Security"
-	violationTypeLicense         = "License"
-	violationTypeOperationalRisk = "Operational_Risk"
-)
-
-type violationsRequest struct {
-	Filters    *violationsFilters    `json:"filters,omitempty"`
-	Pagination *violationsPagination `json:"pagination,omitempty"`
-}
-
-type violationsPagination struct {
-	Limit     int    `json:"limit,omitempty"`
-	Offset    int    `json:"offset,omitempty"`
-	OrderBy   string `json:"order_by,omitempty"`
-	Direction string `json:"direction,omitempty"`
-}
-
-type violationsFilters struct {
-	IncludeDetails bool                     `json:"include_details,omitempty"`
-	Resources      violationResourceFilters `json:"resources,omitempty"`
-}
-
-type violationResourceFilters struct {
-	Artifacts []violationArtifactFilter `json:"artifacts,omitempty"`
-}
-
-type violationArtifactFilter struct {
-	Repository string `json:"repo"`
-	Path       string `json:"path"`
-}
-
-type violationsResponse struct {
-	Total      int             `json:"total_violations,omitempty"`
-	Violations []xrayViolation `json:"violations,omitempty"`
-}
-
-type xrayViolation struct {
-	IssueId                  string                        `json:"issue_id"`
-	Type                     string                        `json:"type"`
-	Severity                 string                        `json:"severity"`
-	Id                       string                        `json:"violation_id,omitempty"`
-	Description              string                        `json:"description,omitempty"`
-	Summary                  string                        `json:"summary,omitempty"`
-	JfrogResearchInformation *services.ExtendedInformation `json:"extended_information,omitempty"`
-	Cves                     []services.Cve                `json:"properties,omitempty"`
-}
-
 func RunCheckCommand(c *components.Context) error {
 	if len(c.Arguments) == 0 {
 		return fmt.Errorf("image name is required. Usage: check <image:tag>")
@@ -228,147 +180,6 @@ func getSeverityIcon(severity string) string {
 // The watchName filter narrows results to those relevant to the user's JFrog Xray watch.
 func getArtifactSummaryVulnerabilitiesCLI(serverId, projectKey, artifactPath, watchName string) ([]violationWithMalicious, error) {
 	log.Info(fmt.Sprintf("Querying Xray Violations API via CLI for path: %s (project: %s, watch: %s)", artifactPath, projectKey, watchName))
-
-func getViolationsVulnerabilities(xrManager *xray.XrayServicesManager, repoKey, artifactPath string) ([]services.Vulnerability, error) {
-	artifactFilters := buildViolationArtifactFilters(repoKey, artifactPath)
-	if len(artifactFilters) == 0 {
-		return nil, fmt.Errorf("no artifact filters could be built for path %q", artifactPath)
-	}
-
-	response, err := fetchViolations(xrManager, artifactFilters)
-	if err != nil {
-		return nil, err
-	}
-	if response == nil || len(response.Violations) == 0 {
-		return nil, nil
-	}
-
-	return mapXrayViolationsToVulnerabilities(response.Violations), nil
-}
-
-func fetchViolations(xrManager *xray.XrayServicesManager, artifactFilters []violationArtifactFilter) (*violationsResponse, error) {
-	xrayDetails := xrManager.Config().GetServiceDetails()
-	violationsEndpoint := buildXrayAPIEndpoint(xrayDetails.GetUrl(), "/api/v1/violations")
-	httpClientDetails := xrayDetails.CreateHttpClientDetails()
-
-	requestPayload := violationsRequest{
-		Filters: &violationsFilters{
-			IncludeDetails: true,
-			Resources: violationResourceFilters{
-				Artifacts: artifactFilters,
-			},
-		},
-		Pagination: &violationsPagination{
-			OrderBy:   "created",
-			Limit:     500,
-			Offset:    1,
-			Direction: "asc",
-		},
-	}
-
-	requestBody, err := json.Marshal(requestPayload)
-	if err != nil {
-		return nil, err
-	}
-
-	resp, body, err := xrManager.Client().SendPost(violationsEndpoint, requestBody, &httpClientDetails)
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("violations API returned status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
-	}
-
-	var response violationsResponse
-	if err := json.Unmarshal(body, &response); err != nil {
-		return nil, fmt.Errorf("couldn't parse violations API response: %w", err)
-	}
-	return &response, nil
-}
-
-func buildViolationArtifactFilters(repoKey, artifactPath string) []violationArtifactFilter {
-	basePath := strings.Trim(strings.TrimSpace(artifactPath), "/")
-	if basePath == "" {
-		return nil
-	}
-
-	added := make(map[string]struct{})
-	var filters []violationArtifactFilter
-	addFilter := func(repository, path string) {
-		repository = strings.TrimSpace(repository)
-		path = strings.Trim(strings.TrimSpace(path), "/")
-		if repository == "" || path == "" {
-			return
-		}
-		key := repository + "|" + path
-		if _, exists := added[key]; exists {
-			return
-		}
-		added[key] = struct{}{}
-		filters = append(filters, violationArtifactFilter{
-			Repository: repository,
-			Path:       path,
-		})
-	}
-
-	// Keep broad compatibility with known Xray path variants used by the existing summary flow.
-	repo, path := parseArtifactPath(basePath)
-	addFilter(repo, path)
-	addFilter(repoKey, basePath)
-	if strings.HasPrefix(basePath, repoKey+"/") {
-		addFilter(repoKey, strings.TrimPrefix(basePath, repoKey+"/"))
-	}
-
-	const dockerPrefix = "docker/"
-	if strings.HasPrefix(basePath, dockerPrefix) {
-		trimmed := strings.TrimPrefix(basePath, dockerPrefix)
-		dockerRepo, dockerPath := parseArtifactPath(trimmed)
-		addFilter(dockerRepo, dockerPath)
-		if strings.HasPrefix(trimmed, repoKey+"/") {
-			addFilter(repoKey, strings.TrimPrefix(trimmed, repoKey+"/"))
-		}
-	}
-
-	return filters
-}
-
-func mapXrayViolationsToVulnerabilities(violations []xrayViolation) []services.Vulnerability {
-	vulnerabilities := make([]services.Vulnerability, 0, len(violations))
-	for _, violation := range violations {
-		issueID := violation.IssueId
-		if issueID == "" {
-			issueID = violation.Id
-		}
-
-		summary := strings.TrimSpace(violation.Summary)
-		if summary == "" {
-			summary = violation.Description
-		}
-
-		vulnerabilities = append(vulnerabilities, services.Vulnerability{
-			IssueId:             issueID,
-			Summary:             summary,
-			Severity:            violation.Severity,
-			Cves:                violation.Cves,
-			Technology:          normalizeViolationType(violation.Type),
-			ExtendedInformation: violation.JfrogResearchInformation,
-		})
-	}
-	return vulnerabilities
-}
-
-func normalizeViolationType(violationType string) string {
-	switch violationType {
-	case violationTypeSecurity:
-		return "Security"
-	case violationTypeLicense:
-		return "License"
-	case violationTypeOperationalRisk:
-		return "Operational Risk"
-	default:
-		return violationType
-	}
-}
 
 func getArtifactSummaryVulnerabilities(xrManager *xray.XrayServicesManager, artifactPath, sha256 string) ([]services.Vulnerability, error) {
 	log.Info(fmt.Sprintf("Querying Xray summary for path: %s", artifactPath))
@@ -989,15 +800,15 @@ func generateVulnerabilityReport(conf *CheckConfiguration, serverDetails *config
 		// Step 3: Query vulnerabilities for each platform path
 	vulnMap := make(map[string]services.Vulnerability)
 	var successfulPath string
-	var sourceService string
 
-	// Try each Docker path format against ViolationsService first.
+	// Try each Docker path format until we get vulnerability data
 	for _, path := range dockerPaths {
 		if !conf.Silent {
 			log.Info(fmt.Sprintf("Querying Xray for: %s (digests: %v)", dp.path, dp.digests))
 		}
 
-		vulns, err := getViolationsVulnerabilities(xrManager, repoKey, path)
+		// Query vulnerabilities using Xray SummaryService from the JFrog Go SDK.
+		vulns, err := getArtifactSummaryVulnerabilities(xrManager, path, "")
 		if err == nil && len(vulns) > 0 {
 			// Add vulnerabilities to map (deduplicating by IssueId)
 			beforeCount := len(vulnMap)
@@ -1013,10 +824,9 @@ func generateVulnerabilityReport(conf *CheckConfiguration, serverDetails *config
 
 			if successfulPath == "" {
 				successfulPath = path
-				sourceService = "ViolationsService"
 			}
 			if !conf.Silent {
-				log.Info(fmt.Sprintf("Found %d vulnerabilities using Xray ViolationsService with path: %s", len(vulns), path))
+				log.Info(fmt.Sprintf("Found %d vulnerabilities using Xray SummaryService with path: %s", len(vulns), path))
 				if beforeCount != afterCount {
 					log.Info(fmt.Sprintf("Added %d new unique vulnerabilities (total unique: %d)", afterCount-beforeCount, afterCount))
 				}
@@ -1025,46 +835,7 @@ func generateVulnerabilityReport(conf *CheckConfiguration, serverDetails *config
 		}
 
 		if !conf.Silent {
-			if err != nil {
-				log.Debug(fmt.Sprintf("ViolationsService lookup failed for path %s: %v", path, err))
-			} else {
-				log.Debug(fmt.Sprintf("No violations found for path: %s", path))
-			}
-		}
-	}
-
-	// Fall back to SummaryService to preserve compatibility in environments where violations data isn't available.
-	if len(vulnMap) == 0 {
-		for _, path := range dockerPaths {
-			if !conf.Silent {
-				log.Debug(fmt.Sprintf("Summary fallback trying path: %s", path))
-			}
-
-			vulns, err := getArtifactSummaryVulnerabilities(xrManager, path, "")
-			if err == nil && len(vulns) > 0 {
-				beforeCount := len(vulnMap)
-				for _, vuln := range vulns {
-					if vuln.IssueId != "" {
-						vulnMap[vuln.IssueId] = vuln
-					}
-				}
-				afterCount := len(vulnMap)
-				if successfulPath == "" {
-					successfulPath = path
-					sourceService = "SummaryService"
-				}
-				if !conf.Silent {
-					log.Info(fmt.Sprintf("Found %d vulnerabilities using Xray SummaryService with path: %s", len(vulns), path))
-					if beforeCount != afterCount {
-						log.Info(fmt.Sprintf("Added %d new unique vulnerabilities (total unique: %d)", afterCount-beforeCount, afterCount))
-					}
-				}
-				break
-			}
-
-			if !conf.Silent {
-				log.Debug(fmt.Sprintf("No summary data found for path: %s", path))
-			}
+			log.Debug(fmt.Sprintf("No data found for path: %s", path))
 		}
 	}
 
@@ -1077,7 +848,7 @@ func generateVulnerabilityReport(conf *CheckConfiguration, serverDetails *config
 	// If no vulnerabilities found through direct paths, try discovery approach
 	if len(allVulns) == 0 {
 		if !conf.Silent {
-			log.Info("Violations and summary path lookup failed, trying discovery approach...")
+			log.Info("Direct path lookup failed, trying discovery approach...")
 			// Run discovery for debugging (doesn't return artifacts, just logs)
 			discoverXrayArtifacts(xrManager, repoKey, imageName)
 		}
@@ -1115,8 +886,8 @@ func generateVulnerabilityReport(conf *CheckConfiguration, serverDetails *config
 	}
 
 		if successfulPath != "" && !conf.Silent {
-			log.Info(fmt.Sprintf("Successfully generated report with %d vulnerabilities from %s path: %s",
-				len(allVulns), sourceService, successfulPath))
+			log.Info(fmt.Sprintf("Successfully generated report with %d vulnerabilities from path: %s",
+				len(allVulns), successfulPath))
 		}
 	} else {
 		if !conf.Silent {

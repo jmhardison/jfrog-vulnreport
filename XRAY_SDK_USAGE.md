@@ -16,8 +16,6 @@ This approach had several issues:
 
 ## Corrected Approaches
 
-> Current plugin implementation uses **ViolationsService as the primary source** and keeps **SummaryService as a fallback** for compatibility with environments where violations queries are not yet sufficient.
-
 ### 1. ReportService (Primary Method)
 
 **Purpose**: Fetch comprehensive vulnerability reports from existing scans
