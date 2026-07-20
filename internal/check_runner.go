@@ -180,34 +180,22 @@ func getSeverityIcon(severity string) string {
 // The watchName filter narrows results to those relevant to the user's JFrog Xray watch.
 func getArtifactSummaryVulnerabilitiesCLI(serverId, projectKey, artifactPath, watchName string) ([]violationWithMalicious, error) {
 	log.Info(fmt.Sprintf("Querying Xray Violations API via CLI for path: %s (project: %s, watch: %s)", artifactPath, projectKey, watchName))
-
-func getArtifactSummaryVulnerabilities(xrManager *xray.XrayServicesManager, artifactPath, sha256 string) ([]services.Vulnerability, error) {
-	log.Info(fmt.Sprintf("Querying Xray summary for path: %s", artifactPath))
-
-	summaryService := services.NewSummaryService(xrManager.Client())
-	xrayDetails := xrManager.Config().GetServiceDetails()
-	summaryService.XrayDetails = xrayDetails
-
-	params := services.ArtifactSummaryParams{
-		Paths: []string{artifactPath},
-	}
-
-	if sha256 != "" {
-		params.Checksums = []string{sha256}
-		log.Info(fmt.Sprintf("Including checksum: %s", sha256))
-	}
-
-	log.Info(fmt.Sprintf("Making Xray SDK summary call to: %s", xrayDetails.GetUrl()))
-
-	summary, err := summaryService.GetArtifactSummary(params)
-	if err != nil {
-		return nil, fmt.Errorf("failed to query Xray Violations API via CLI: %w", err)
-	}
-
-	log.Info(fmt.Sprintf("Extracted %d violations from Violations API response (malicious status included)", len(results)))
-	return results, nil
+	return queryXrayViolationsViaCLIVulnerabilitiesWithMalicious(serverId, projectKey, artifactPath, watchName)
 }
 
+
+
+// extractVulnsFromViolations converts a slice of violationWithMalicious to []services.Vulnerability.
+func extractVulnsFromViolations(violations []violationWithMalicious) []services.Vulnerability {
+	if violations == nil {
+		return nil
+	}
+	vulns := make([]services.Vulnerability, 0, len(violations))
+	for _, v := range violations {
+		vulns = append(vulns, v.Vulnerability)
+	}
+	return vulns
+}
 
 // filterVulnerabilitiesBySeverity filters a vulnerability list by minimum severity threshold.
 // When minSeverity is "Malicious", uses the pre-built lookup map (no Events API calls needed).
@@ -797,46 +785,42 @@ func generateVulnerabilityReport(conf *CheckConfiguration, serverDetails *config
 		log.Debug(fmt.Sprintf("Malicious watch query for path %s returned %d violation(s)", dp.path, len(maliciousResults)))
 	}
 
-		// Step 3: Query vulnerabilities for each platform path
+	// Step 3: Query vulnerabilities for each platform path
+	var lastSuccessfulViolations []violationWithMalicious
 	vulnMap := make(map[string]services.Vulnerability)
 	var successfulPath string
+	var lastDp dockerPath
 
 	// Try each Docker path format until we get vulnerability data
-	for _, path := range dockerPaths {
+	for _, dp := range platformPaths {
 		if !conf.Silent {
 			log.Info(fmt.Sprintf("Querying Xray for: %s (digests: %v)", dp.path, dp.digests))
 		}
 
-		// Query vulnerabilities using Xray SummaryService from the JFrog Go SDK.
-		vulns, err := getArtifactSummaryVulnerabilities(xrManager, path, "")
-		if err == nil && len(vulns) > 0 {
+			violations, err := queryXrayViolationsViaCLIVulnerabilitiesWithMalicious(conf.ServerId, conf.ProjectKey, dp.path, "")
+		if err == nil && len(violations) > 0 {
 			// Add vulnerabilities to map (deduplicating by IssueId)
 			beforeCount := len(vulnMap)
-			for _, vuln := range vulns {
-				if vuln.IssueId != "" {
-					vulnMap[vuln.IssueId] = vuln
+			for _, v := range violations {
+				if v.Vulnerability.IssueId != "" {
+					vulnMap[v.Vulnerability.IssueId] = v.Vulnerability
 				}
 			}
-		}
-
-		if len(results) > 0 {
-			newUnique := len(vulnMap) - beforeCount
-
+			lastSuccessfulViolations = violations
 			if successfulPath == "" {
-				successfulPath = path
+				successfulPath = dp.path
 			}
 			if !conf.Silent {
-				log.Info(fmt.Sprintf("Found %d vulnerabilities using Xray SummaryService with path: %s", len(vulns), path))
-				if beforeCount != afterCount {
-					log.Info(fmt.Sprintf("Added %d new unique vulnerabilities (total unique: %d)", afterCount-beforeCount, afterCount))
-				}
+				log.Info(fmt.Sprintf("Found %d vulnerabilities with path: %s", len(violations), dp.path))
+				log.Info(fmt.Sprintf("Added %d new unique vulnerabilities (total unique: %d)", len(vulnMap)-beforeCount, len(vulnMap)))
 			}
 			break // Found data, stop trying more paths
 		}
 
 		if !conf.Silent {
-			log.Debug(fmt.Sprintf("No data found for path: %s", path))
+			log.Debug(fmt.Sprintf("No data found for path: %s", dp.path))
 		}
+		lastDp = dp
 	}
 
 	// Convert map back to slice for processing
@@ -845,31 +829,28 @@ func generateVulnerabilityReport(conf *CheckConfiguration, serverDetails *config
 		allVulns = append(allVulns, vuln)
 	}
 
-	// If no vulnerabilities found through direct paths, try discovery approach
-	if len(allVulns) == 0 {
-		if !conf.Silent {
-			log.Info("Direct path lookup failed, trying discovery approach...")
-			// Run discovery for debugging (doesn't return artifacts, just logs)
-			discoverXrayArtifacts(xrManager, repoKey, imageName)
-		}
-
-		platformInfo := PlatformVulnerabilityInfo{
-			Vulnerabilities:  vulns,
-			ManifestDigest:   dp.digests[0],
-			Platform: Platform{
-				OS:           dp.os,
-				Architecture: dp.arch,
-			},
-		}
-
-		if dp.isList {
-			report.IsMultiPlatform = true // Remember this was a multi-platform image for manifest URL construction
-		}
-		report.Platforms = append(report.Platforms, platformInfo)
+	// Add platform info to report
+	if !conf.Silent && successfulPath != "" {
+		log.Info(fmt.Sprintf("Successfully generated report with %d vulnerabilities from path: %s",
+			len(allVulns), successfulPath))
 	}
 
+	platformInfo := PlatformVulnerabilityInfo{
+		Vulnerabilities:  extractVulnsFromViolations(lastSuccessfulViolations),
+		ManifestDigest:   lastDp.digests[0],
+		Platform: Platform{
+			OS:           lastDp.os,
+			Architecture: lastDp.arch,
+		},
+	}
+
+	if lastDp.isList {
+		report.IsMultiPlatform = true // Remember this was a multi-platform image for manifest URL construction
+	}
+	report.Platforms = append(report.Platforms, platformInfo)
+
 	// Step 4: Calculate summary counts from all platforms
-	report.TotalIssues = totalVulnsAcrossPlatforms
+	report.TotalIssues = len(allVulns)
 	for _, platform := range report.Platforms {
 		for _, vuln := range platform.Vulnerabilities {
 			switch vuln.Severity {
@@ -882,16 +863,6 @@ func generateVulnerabilityReport(conf *CheckConfiguration, serverDetails *config
 			case "Low":
 				report.LowCount++
 			}
-		}
-	}
-
-		if successfulPath != "" && !conf.Silent {
-			log.Info(fmt.Sprintf("Successfully generated report with %d vulnerabilities from path: %s",
-				len(allVulns), successfulPath))
-		}
-	} else {
-		if !conf.Silent {
-			log.Info("No vulnerabilities found for this image")
 		}
 	}
 
