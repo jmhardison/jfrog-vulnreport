@@ -298,15 +298,18 @@ func base64EncodedLen(n int) int {
 
 // queryXrayViolationsViaCLI queries the Xray Violations API for an artifact.
 // This is the correct endpoint for Docker image vulnerability queries (not SummaryService).
-func queryXrayViolationsViaCLI(serverId string, projectKey string, artifactPath string) ([]byte, error) {
-	if artifactPath == "" {
-		return nil, fmt.Errorf("no artifact path provided")
+// The watchName filter narrows results to those relevant to the user's JFrog Xray watch —
+// without it, the API returns all violations in the project (potentially thousands of unrelated results).
+func queryXrayViolationsViaCLI(serverId string, projectKey string, artifactPath string, watchName string) ([]byte, error) {
+	if artifactPath == "" || watchName == "" {
+		return nil, fmt.Errorf("artifact path and watch name are both required")
 	}
 
-	log.Debug(fmt.Sprintf("Querying Xray Violations API for: %s (project: %s)", artifactPath, projectKey))
+	log.Debug(fmt.Sprintf("Querying Xray Violations API for: %s (project: %s, watch: %s)", artifactPath, projectKey, watchName))
 
 	req := map[string]interface{}{
 		"filters": map[string]interface{}{
+			"watch_name": watchName,
 			"resources": map[string]interface{}{
 				"artifacts": []map[string]string{
 					{"repo": extractRepoFromPath(artifactPath), "path": stripRepoPrefix(artifactPath)},
@@ -407,8 +410,9 @@ type violationWithMalicious struct {
 // This is the primary entry point for Docker image vulnerability queries. It extracts both
 // vulnerability data AND malicious_package status in a single HTTP request, eliminating the need
 // for separate Events API calls per issue ID (which previously caused N+1 HTTP requests).
-func queryXrayViolationsViaCLIVulnerabilitiesWithMalicious(serverId, projectKey, artifactPath string) ([]violationWithMalicious, error) {
-	body, err := queryXrayViolationsViaCLI(serverId, projectKey, artifactPath)
+// The watchName filter narrows results to those relevant to the user's JFrog Xray watch.
+func queryXrayViolationsViaCLIVulnerabilitiesWithMalicious(serverId, projectKey, artifactPath, watchName string) ([]violationWithMalicious, error) {
+	body, err := queryXrayViolationsViaCLI(serverId, projectKey, artifactPath, watchName)
 	if err != nil {
 		return nil, err
 	}

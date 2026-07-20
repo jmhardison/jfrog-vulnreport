@@ -77,6 +77,10 @@ func getCheckFlags() []components.Flag {
 			"project-key",
 			"Xray project key for violation queries. Defaults to 'default' if not specified.",
 		),
+		components.NewStringFlag(
+			"watch-name",
+			"JFrog Xray watch name to filter violations (e.g., dockerlocal-malicious-critical). Required.",
+		),
 	}
 }
 

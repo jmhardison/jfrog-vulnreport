@@ -51,11 +51,17 @@ func RunCheckCommand(c *components.Context) error {
 		DebugPaths:        c.GetBoolFlagValue("debug-paths"),
 		DockerRegistryURL: c.GetStringFlagValue("docker-registry-url"),
 		ProjectKey:        c.GetStringFlagValue("project-key"),
+		WatchName:         c.GetStringFlagValue("watch-name"),
 	}
 
-	// Default project key to "default" if not specified
+	// Default project key to "default" if not specified.
 	if conf.ProjectKey == "" {
 		conf.ProjectKey = "default"
+	}
+
+	// watch-name is mandatory — users must explicitly choose which Xray watch's violations they want reported.
+	if conf.WatchName == "" {
+		return fmt.Errorf("--watch-name is required (e.g., dockerlocal-malicious-critical)")
 	}
 
 	// Configure log level based on output format
@@ -83,19 +89,29 @@ func RunCheckCommand(c *components.Context) error {
 		return fmt.Errorf("failed to get server configuration: %w", err)
 	}
 
-	// Extract base Artifactory URL and build manifest link path for github-md output.
-	artifactoryUrl := strings.TrimRight(serverDetails.GetArtifactoryUrl(), "/")
-	manifestPath := fmt.Sprintf("%s/%s/%s/manifest.json", repoKey, imageName, tag)
-
 	// Generate vulnerability report (all Xray queries use CLI wrappers in internal/xray_cli.go).
 	// The malicious lookup map is populated from the Violations API response, eliminating N+1 Events API calls.
-	report, maliciousLookup, err := generateVulnerabilityReport(conf, serverDetails, repoKey, imageName, tag)
+	report, maliciousLookup, err := generateVulnerabilityReport(conf, serverDetails, repoKey, imageName, tag, conf.WatchName)
 	if err != nil {
 		return fmt.Errorf("failed to generate vulnerability report: %w", err)
 	}
 
-	// Output the report (passes artifactoryUrl and manifestPath through for github-md links).
-	if err := outputReport(report, maliciousLookup, conf.Output, artifactoryUrl, manifestPath, conf.MinSeverity, conf.ShowFindings); err != nil {
+	// Extract base platform URL and build manifest link path for github-md output.
+	// The UI portal uses /ui/repos/tree/Xray/<repo>/<path> format, not the raw Artifactory URL.
+	// Uses list.manifest.json for multi-platform images (shows all platforms), manifest.json for single-platform.
+	baseUrl := strings.TrimRight(serverDetails.GetArtifactoryUrl(), "/")
+	if idx := strings.Index(baseUrl, "/artifactory"); idx >= 0 {
+		baseUrl = baseUrl[:idx] // Strip /artifactory to get base JFrog platform URL
+	}
+	manifestFilename := "manifest.json"
+	if report.IsMultiPlatform {
+		manifestFilename = "list.manifest.json"
+	}
+	manifestPath := fmt.Sprintf("%s/%s/%s/%s", repoKey, imageName, tag, manifestFilename)
+	uiPortalManifestUrl := fmt.Sprintf("%s/ui/repos/tree/Xray/%s", baseUrl, manifestPath)
+
+	// Output the report (passes uiPortalManifestUrl through for github-md links to JFrog Platform UI).
+	if err := outputReport(report, maliciousLookup, conf.Output, uiPortalManifestUrl, conf.MinSeverity, conf.ShowFindings); err != nil {
 		return fmt.Errorf("failed to output report: %w", err)
 	}
 
@@ -159,12 +175,13 @@ func getSeverityIcon(severity string) string {
 // getArtifactSummaryVulnerabilitiesCLI queries Xray Violations API using JFrog CLI subprocess to bypass JWT audience restrictions.
 // Replaced SummaryService (/api/v1/summary/artifact) which hangs indefinitely for Docker images with Violations API (/api/v1/violations).
 // Returns violations alongside their malicious_package status from the same response (no separate Events API calls needed).
-func getArtifactSummaryVulnerabilitiesCLI(serverId, projectKey, artifactPath string) ([]violationWithMalicious, error) {
-	log.Info(fmt.Sprintf("Querying Xray Violations API via CLI for path: %s (project: %s)", artifactPath, projectKey))
+// The watchName filter narrows results to those relevant to the user's JFrog Xray watch.
+func getArtifactSummaryVulnerabilitiesCLI(serverId, projectKey, artifactPath, watchName string) ([]violationWithMalicious, error) {
+	log.Info(fmt.Sprintf("Querying Xray Violations API via CLI for path: %s (project: %s, watch: %s)", artifactPath, projectKey, watchName))
 
 	// Use the correct Violations API endpoint instead of SummaryService (which hangs for Docker images).
 	// The Violations response already includes malicious_package per violation, eliminating N+1 Events API calls.
-	results, err := queryXrayViolationsViaCLIVulnerabilitiesWithMalicious(serverId, projectKey, artifactPath)
+	results, err := queryXrayViolationsViaCLIVulnerabilitiesWithMalicious(serverId, projectKey, artifactPath, watchName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query Xray Violations API via CLI: %w", err)
 	}
@@ -296,14 +313,14 @@ func generateSecurityBanner(report *VulnerabilityReport, maliciousLookup map[str
 
 
 // outputReport dispatches to the appropriate formatter based on the requested output format.
-// artifactoryUrl and manifestPath are used by github-md output to render a clickable link to the image's
-// manifest in Artifactory — no additional API calls needed, just URL construction from server config.
-func outputReport(report *VulnerabilityReport, maliciousLookup map[string]bool, output string, artifactoryUrl, manifestPath string, minSeverity string, showFindings bool) error {
+// manifestUrl is used by github-md output to render a clickable link to the image's manifest in JFrog Platform UI —
+// no additional API calls needed, just URL construction from server config.
+func outputReport(report *VulnerabilityReport, maliciousLookup map[string]bool, output string, manifestUrl string, minSeverity string, showFindings bool) error {
 	switch output {
 	case "json":
 		return outputJSONReport(report, maliciousLookup)
 	case "github-md":
-		return outputMarkdownReport(report, maliciousLookup, artifactoryUrl, manifestPath, minSeverity, showFindings)
+		return outputMarkdownReport(report, maliciousLookup, manifestUrl, minSeverity, showFindings)
 	default:
 		return fmt.Errorf("unsupported output format: %s. Use 'json' or 'github-md'", output)
 	}
@@ -387,19 +404,20 @@ func convertToEnhancedReport(report *VulnerabilityReport, maliciousLookup map[st
 }
 
 // outputMarkdownReport generates a GitHub-flavored markdown security report. Uses the pre-built malicious
-// lookup map (no Events API calls) for per-finding malicious status and summary counts. The artifactoryUrl
-// and manifestPath parameters are used to render a clickable link to the image's manifest in Artifactory —
-// constructed as <artifactoryUrl>/<repo>/<image>/<tag>/manifest.json without additional HTTP requests.
-func outputMarkdownReport(report *VulnerabilityReport, maliciousLookup map[string]bool, artifactoryUrl, manifestPath string, minSeverity string, showFindings bool) error {
+// lookup map (no Events API calls) for per-finding malicious status and summary counts. The manifestUrl
+// parameter is used to render a clickable link to the image's manifest in JFrog Platform UI —
+// constructed as <baseUrl>/ui/repos/tree/General/<repo>/<path>/list.manifest.json without additional HTTP requests.
+func outputMarkdownReport(report *VulnerabilityReport, maliciousLookup map[string]bool, manifestUrl string, minSeverity string, showFindings bool) error {
 	// For GitHub MD output, suppress verbose logging and banners for silent operation
 	silent := true
 
-	fmt.Printf("# Xray Security Report: %s\n\n", report.ImageName)
+	fmt.Printf("# Xray Security Report\n\n")
+	fmt.Printf("## %s\n\n", report.ImageName)
 
-	// Render a clickable link to the image's manifest in Artifactory so users can view their image directly.
-	// The URL is constructed from server config without additional API calls — just string concatenation.
-	if artifactoryUrl != "" && manifestPath != "" {
-		fmt.Printf("> **View manifest:** [%s](%s/%s)\n\n", report.ImageName, strings.TrimRight(artifactoryUrl, "/"), manifestPath)
+	// Render a clickable link to the image's manifest in JFrog Platform UI so users can view their image directly.
+	// The URL is pre-constructed from server config — no additional API calls needed.
+	if manifestUrl != "" {
+		fmt.Printf("> **View manifest:** [%s](%s)\n\n", report.ImageName, manifestUrl)
 	}
 
 	fmt.Println()
@@ -590,14 +608,16 @@ func getXrayServiceURL(serverDetails *config.ServerDetails) string {
 
 // generateVulnerabilityReport orchestrates the full vulnerability query pipeline:
 //  1. Discovers artifact paths via Artifactory search (handles both single and multi-platform images)
-//  2. Queries Xray Violations API for each platform path
+//  2. Queries Xray Violations API for each platform path, scoped to watch_name
 //  3. Builds a malicious lookup map from Violations response data
 //  4. Aggregates vulnerability counts across all platforms
 //
+// The watchName filter narrows violations to those relevant to the user's JFrog Xray watch — without it,
+// the API returns all violations in the project (potentially thousands of unrelated results).
 // The maliciousLookup map is populated from the Violations API response (not Events API), eliminating
 // N+1 HTTP requests. It maps issue ID → whether it's a malicious package, and is passed to output
 // functions for use in report generation.
-func generateVulnerabilityReport(conf *CheckConfiguration, serverDetails *config.ServerDetails, repoKey, imageName, tag string) (*VulnerabilityReport, map[string]bool, error) {
+func generateVulnerabilityReport(conf *CheckConfiguration, serverDetails *config.ServerDetails, repoKey, imageName, tag, watchName string) (*VulnerabilityReport, map[string]bool, error) {
 	if !conf.Silent {
 		log.Info(fmt.Sprintf("Generating vulnerability report for %s/%s:%s", repoKey, imageName, tag))
 	}
@@ -674,10 +694,10 @@ func generateVulnerabilityReport(conf *CheckConfiguration, serverDetails *config
 
 		if len(dp.digests) > 0 {
 			// Multi-platform or single-platform with digest — query by checksum (checksums now ignored, path is primary key for Violations API)
-			results, err = getArtifactSummaryVulnerabilitiesCLI(conf.ServerId, conf.ProjectKey, dp.path)
+			results, err = getArtifactSummaryVulnerabilitiesCLI(conf.ServerId, conf.ProjectKey, dp.path, watchName)
 		} else {
 			// Single-platform without explicit digest — query by path only
-			results, err = getArtifactSummaryVulnerabilitiesCLI(conf.ServerId, conf.ProjectKey, dp.path)
+			results, err = getArtifactSummaryVulnerabilitiesCLI(conf.ServerId, conf.ProjectKey, dp.path, watchName)
 		}
 
 		if err != nil {
@@ -734,6 +754,9 @@ func generateVulnerabilityReport(conf *CheckConfiguration, serverDetails *config
 			},
 		}
 
+		if dp.isList {
+			report.IsMultiPlatform = true // Remember this was a multi-platform image for manifest URL construction
+		}
 		report.Platforms = append(report.Platforms, platformInfo)
 	}
 

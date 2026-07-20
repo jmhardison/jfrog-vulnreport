@@ -62,19 +62,21 @@ type CheckConfiguration struct {
 	DebugPaths        bool   // Log artifact discovery paths for troubleshooting
 	DockerRegistryURL string // Override URL for Docker registry (for direct manifest fetch)
 	ProjectKey        string // Xray project key for violation queries (defaults to "default")
+	WatchName         string // JFrog Xray watch name — filters violations to those relevant to the user's watch
 }
 
 // VulnerabilityReport is the core report structure returned by generateVulnerabilityReport.
 // Contains per-platform vulnerability groups with raw services.Vulnerability data from Xray.
 type VulnerabilityReport struct {
-	ImageName     string                      `json:"imageName"`
-	Platforms     []PlatformVulnerabilityInfo `json:"platforms"`
-	TotalIssues   int                         `json:"totalIssues"`
-	CriticalCount int                         `json:"criticalCount"`
-	HighCount     int                         `json:"highCount"`
-	MediumCount   int                         `json:"mediumCount"`
-	LowCount      int                         `json:"lowCount"`
-	GeneratedAt   string                      `json:"generatedAt"`
+	ImageName        string                      `json:"imageName"`
+	Platforms        []PlatformVulnerabilityInfo `json:"platforms"`
+	TotalIssues      int                         `json:"totalIssues"`
+	CriticalCount    int                         `json:"criticalCount"`
+	HighCount        int                         `json:"highCount"`
+	MediumCount      int                         `json:"mediumCount"`
+	LowCount         int                         `json:"lowCount"`
+	GeneratedAt      string                      `json:"generatedAt"`
+	IsMultiPlatform  bool                        `json:"isMultiPlatform,omitempty"` // true if list.manifest.json was expanded into per-platform entries
 }
 
 // PlatformVulnerabilityInfo groups vulnerabilities discovered for a single platform variant.
