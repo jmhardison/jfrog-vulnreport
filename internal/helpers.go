@@ -6,8 +6,8 @@ import (
 	"strings"
 )
 
-
-
+// GetDockerRegistryPaths returns standard Docker artifact paths for a given image reference.
+// Paths use the convention <repo>/<image>/<tag>/ with extensions for list manifest and single manifest entries.
 func GetDockerRegistryPaths(repoKey, imageName, tag string) map[string]string {
 	base := fmt.Sprintf("%s/%s/%s", repoKey, imageName, tag)
 	return map[string]string{
@@ -16,6 +16,8 @@ func GetDockerRegistryPaths(repoKey, imageName, tag string) map[string]string {
 	}
 }
 
+// GetDigestPaths returns potential storage paths for a blob by its sha256 digest in JFrog/Artifactory.
+// Multiple path variants are returned because artifact storage layout can vary (e.g., double-underscore vs single).
 func GetDigestPaths(repoKey, digest string) []string {
 	normalizedDigest := strings.TrimPrefix(digest, "sha256:")
 	return []string{
@@ -26,6 +28,8 @@ func GetDigestPaths(repoKey, digest string) []string {
 	}
 }
 
+// IsValidManifestContent validates that raw bytes contain a valid Docker manifest (checks JSON structure
+// and schemaVersion > 0). Returns false for empty content, invalid JSON, or missing/invalid schemaVersion.
 func IsValidManifestContent(content []byte) bool {
 	if len(content) == 0 {
 		return false

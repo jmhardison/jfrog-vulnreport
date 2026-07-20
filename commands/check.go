@@ -5,6 +5,8 @@ import (
 	helperinternal "github.com/jmhardison/jfrog-vulnreport/internal"
 )
 
+// GetCheckCommand returns the CLI command definition for the 'check' subcommand.
+// It registers all CLI flags, arguments, and environment variables needed to run a vulnerability check.
 func GetCheckCommand() components.Command {
 	return components.Command{
 		Name:        "check",
@@ -19,10 +21,14 @@ func GetCheckCommand() components.Command {
 	}
 }
 
+// checkCmd is the action handler invoked by JFrog CLI when the 'check' command runs.
+// It delegates all logic to the internal package's RunCheckCommand function.
 func checkCmd(c *components.Context) error {
 	return helperinternal.RunCheckCommand(c)
 }
 
+// getCheckArguments defines the positional arguments for the check command.
+// Currently only requires a single image:tag argument.
 func getCheckArguments() []components.Argument {
 	return []components.Argument{
 		{
@@ -32,6 +38,8 @@ func getCheckArguments() []components.Argument {
 	}
 }
 
+// getCheckFlags defines all CLI flags available to the check command.
+// Flag definitions include string, boolean, and optional-value variants with default values where applicable.
 func getCheckFlags() []components.Flag {
 	return []components.Flag{
 		components.NewStringFlag(
@@ -88,6 +96,8 @@ func getCheckFlags() []components.Flag {
 	}
 }
 
+// getCheckEnvVar defines environment variables that can override CLI flags.
+// Currently none are defined; all configuration is done via flags only.
 func getCheckEnvVar() []components.EnvVar {
 	return []components.EnvVar{}
 }
