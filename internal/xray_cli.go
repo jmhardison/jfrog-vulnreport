@@ -45,13 +45,11 @@ type xraySummaryResult struct {
 	Artifacts []xrayArtifact `json:"artifacts"`
 }
 
-// xrayArtifact represents a single artifact entry in the Xray SummaryService response.
 type xrayArtifact struct {
 	Path string `json:"path"`
 	Issues []xrayIssue `json:"issues"`
 }
 
-// xrayIssue represents a security issue found within an artifact by Xray.
 type xrayIssue struct {
 	IssueId     string  `json:"issue_id"`
 	Summary     string  `json:"summary"`
@@ -61,7 +59,6 @@ type xrayIssue struct {
 	Cves        []xrayCve `json:"cves"`
 }
 
-// xrayCve represents a single CVE entry within an Xray issue response, containing score and CWE references.
 type xrayCve struct {
 	Id          string   `json:"id"`
 	CvssV2Score string   `json:"cvss_v2_score"`
@@ -376,8 +373,6 @@ type xrayViolation struct {
 	ExtendedInformation  *xrayViolationInfo `json:"extended_information,omitempty"`
 }
 
-// xrayViolationInfo holds extended details about an Xray violation, including description text
-// and JFrog Research-assigned severity ratings.
 type xrayViolationInfo struct {
 	ShortDescription      string `json:"short_description"`
 	FullDescription       string `json:"full_description"`
