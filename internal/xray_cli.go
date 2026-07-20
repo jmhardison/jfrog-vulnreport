@@ -309,7 +309,8 @@ func queryXrayViolationsViaCLI(serverId string, projectKey string, artifactPath 
 
 	req := map[string]interface{}{
 		"filters": map[string]interface{}{
-			"watch_name": watchName,
+			"watch_name":      watchName,
+			"violation_type": "Security",
 			"resources": map[string]interface{}{
 				"artifacts": []map[string]string{
 					{"repo": extractRepoFromPath(artifactPath), "path": stripRepoPrefix(artifactPath)},
@@ -324,7 +325,7 @@ func queryXrayViolationsViaCLI(serverId string, projectKey string, artifactPath 
 		return nil, fmt.Errorf("failed to marshal violations request: %w", err)
 	}
 
-	args := []string{"xr", "curl", "-XPOST", fmt.Sprintf("/api/v1/violations?projectKey=%s", projectKey), "-H", "Content-Type: application/json", "-d", string(bodyBytes)}
+	args := []string{"xr", "curl", "-XPOST", "/api/v1/violations", "-H", "Content-Type: application/json", "-d", string(bodyBytes)}
 	output, err := runJFCmd(serverId, args)
 	if err != nil {
 		return nil, fmt.Errorf("jf xr curl violations failed: %w", err)

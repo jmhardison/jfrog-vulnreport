@@ -63,6 +63,7 @@ type CheckConfiguration struct {
 	DockerRegistryURL string // Override URL for Docker registry (for direct manifest fetch)
 	ProjectKey        string // Xray project key for violation queries (defaults to "default")
 	WatchName         string // JFrog Xray watch name — filters violations to those relevant to the user's watch
+	MaliciousWatchName string // Required: Xray watch that defines malicious packages (source of truth for malicious detection)
 }
 
 // VulnerabilityReport is the core report structure returned by generateVulnerabilityReport.
@@ -76,7 +77,8 @@ type VulnerabilityReport struct {
 	MediumCount      int                         `json:"mediumCount"`
 	LowCount         int                         `json:"lowCount"`
 	GeneratedAt      string                      `json:"generatedAt"`
-	IsMultiPlatform  bool                        `json:"isMultiPlatform,omitempty"` // true if list.manifest.json was expanded into per-platform entries
+	IsMultiPlatform   bool         `json:"isMultiPlatform,omitempty"` // true if list.manifest.json was expanded into per-platform entries
+	OrphanedMalicious []string     `json:"orphanedMalicious,omitempty"` // malicious IDs from watch not returned as violations by report watch
 }
 
 // PlatformVulnerabilityInfo groups vulnerabilities discovered for a single platform variant.
@@ -108,8 +110,8 @@ type EnhancedVulnerabilityReport struct {
 	Platforms   []EnhancedPlatformInfo `json:"platforms"`
 }
 
-// SecuritySummary provides aggregate counts across all platforms. MaliciousCount is extracted
-// from the Violations API response during report generation — no separate Events API calls needed.
+// SecuritySummary provides aggregate counts across all platforms. MaliciousCount is derived from
+// the --malicious-watch-name watch as the source of truth for malicious detection.
 type SecuritySummary struct {
 	TotalFindings  int `json:"totalFindings"`
 	CriticalCount  int `json:"criticalCount"`
@@ -130,11 +132,11 @@ type EnhancedPlatformInfo struct {
 }
 
 // CompactFinding is a single vulnerability finding in the enhanced report. Malicious indicates
-// whether the associated package was identified as malicious via the Violations API response.
+// whether the issue ID was found in the --malicious-watch-name watch (source of truth).
 type CompactFinding struct {
 	IssueId   string `json:"issueId"`
 	Type      string `json:"type"`        // Issue type: CVE, Malware, License, etc.
 	Severity  string `json:"severity"`    // Low, Medium, High, Critical
-	Malicious bool   `json:"malicious"`   // True if malicious_package field was set in Violations API response
+	Malicious bool   `json:"malicious"`   // True if issue ID was found in the --malicious-watch-name watch
 	CveCount  int    `json:"cveCount"`    // Number of CVEs associated with this finding
 }
