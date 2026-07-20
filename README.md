@@ -1,6 +1,7 @@
 # jfrog-vulnreport
 
 JFrog CLI plugin that reads **existing Xray scan results** for a Docker image and outputs a consolidated vulnerability report.
+The retrieval flow is **Violations API first** (`api/v1/violations` via JFrog client-go), with a Summary API fallback for compatibility.
 
 ## Install
 
@@ -22,6 +23,7 @@ jf plugin uninstall jfrog-vulnreport
 ### `check`
 
 Checks vulnerabilities for a Docker image already scanned by Xray.
+By default, it queries Xray violations for matching artifact paths, then falls back to summary/discovery lookup when needed.
 
 **Usage**
 
