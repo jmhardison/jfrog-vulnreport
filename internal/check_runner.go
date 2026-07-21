@@ -9,8 +9,14 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jfrog/jfrog-cli-core/v2/plugins/common"
 	"github.com/jfrog/jfrog-cli-core/v2/plugins/components"
-	"github.com/jfrog/jfrog-cli-core/v2/utils/config"
+	configCore "github.com/jfrog/jfrog-cli-core/v2/utils/config"
+	accessSdk "github.com/jfrog/jfrog-client-go/access"
+	accessServices "github.com/jfrog/jfrog-client-go/access/services"
+	"github.com/jfrog/jfrog-client-go/auth"
+	configBuilder "github.com/jfrog/jfrog-client-go/config"
+	xraySdk "github.com/jfrog/jfrog-client-go/xray"
 	"github.com/jfrog/jfrog-client-go/utils/log"
 	"github.com/jfrog/jfrog-client-go/xray/services"
 )
@@ -86,14 +92,20 @@ func RunCheckCommand(c *components.Context) error {
 	// Construct Artifactory URL and manifest path for linking from markdown output.
 	// The manifest URL points to <artifactoryUrl>/<repo>/<image>/<tag>/manifest.json — users can click
 	// this link in the github-md report to view their image directly in Artifactory's UI.
-	serverDetails, err := getServerDetails(conf.ServerId)
+	serverDetails, err := getServerDetails(c)
 	if err != nil {
 		return fmt.Errorf("failed to get server configuration: %w", err)
 	}
 
-	// Generate vulnerability report (all Xray queries use CLI wrappers in internal/xray_cli.go).
+	// Generate vulnerability report (uses XrayService for SDK-based Violations API calls).
 	// The malicious lookup map is populated from the Violations API response, eliminating N+1 Events API calls.
-	report, maliciousLookup, err := generateVulnerabilityReport(conf, serverDetails, repoKey, imageName, tag, conf.WatchName, conf.MaliciousWatchName)
+	xraySvc := newXrayService(serverDetails)
+	if xraySvc.XrayDetails != nil {
+		log.Info(fmt.Sprintf("[XrayService] URL=%s AccessToken=%d", xraySvc.XrayDetails.GetUrl(), len(xraySvc.XrayDetails.GetAccessToken())))
+	} else {
+		log.Error("XrayService has no XrayDetails!")
+	}
+	report, maliciousLookup, err := generateVulnerabilityReport(conf, serverDetails, repoKey, imageName, tag, xraySvc, conf.WatchName, conf.MaliciousWatchName)
 	if err != nil {
 		return fmt.Errorf("failed to generate vulnerability report: %w", err)
 	}
@@ -675,11 +687,77 @@ func parseImageName(imageName string) (string, string, string, error) {
 	return repoKey, image, tag, nil
 }
 
-func getServerDetails(serverId string) (*config.ServerDetails, error) {
-	return config.GetSpecificConfig(serverId, true, false)
+// getServerDetails retrieves authenticated server details from the jfrog CLI framework.
+// This ensures JWT tokens are properly initialized via CreateInitialRefreshableTokensIfNeeded,
+// which is required for direct SDK client calls (not just CLI subprocesses).
+func getServerDetails(c *components.Context) (*configCore.ServerDetails, error) {
+	return common.GetServerDetails(c)
 }
 
-func getXrayServiceURL(serverDetails *config.ServerDetails) string {
+func newXrayService(serverDetails *configCore.ServerDetails) *XrayService {
+	xrayDetails, err := serverDetails.CreateXrayAuthConfig()
+	if err != nil {
+		return &XrayService{}
+	}
+
+	// Generate a fresh multi-service JWT access token with XRay audience.
+	// Phase 1's CreateInitialRefreshableTokensIfNeeded only generates an Artifactory-scoped token,
+	// which Xray rejects with InvalidAudience in JFrog Platform 7.x+.
+	xrayAccessToken, err := generateXrayAccessToken(serverDetails)
+	if err != nil {
+		return &XrayService{}
+	}
+
+	// Update the Xray auth config with the fresh multi-service token
+	xrayDetails.SetAccessToken(xrayAccessToken)
+
+	cfg, err := configBuilder.NewConfigBuilder().SetServiceDetails(xrayDetails).Build()
+	if err != nil {
+		return &XrayService{}
+	}
+
+	xrayMgr, err := xraySdk.New(cfg)
+	if err != nil {
+		return &XrayService{}
+	}
+
+	return NewXrayService(xrayMgr.Client(), xrayDetails)
+}
+
+func generateXrayAccessToken(serverDetails *configCore.ServerDetails) (string, error) {
+	// Create access service config using the server's credentials
+	accessAuth, err := serverDetails.CreateAccessAuthConfig()
+	if err != nil {
+		return "", fmt.Errorf("failed to create access auth: %w", err)
+	}
+
+	accessCfg, err := configBuilder.NewConfigBuilder().SetServiceDetails(accessAuth).Build()
+	if err != nil {
+		return "", fmt.Errorf("failed to build access config: %w", err)
+	}
+
+	accessMgr, err := accessSdk.New(accessCfg)
+	if err != nil {
+		return "", fmt.Errorf("failed to create access manager: %w", err)
+	}
+
+	tokenParams := accessServices.CreateTokenParams{
+		CommonTokenParams: auth.CommonTokenParams{
+			Scope:       "member-of-groups:*",
+			Audience:    "XRay",
+		},
+	}
+
+
+	tokenResp, err := accessMgr.CreateAccessToken(tokenParams)
+	if err != nil {
+		return "", fmt.Errorf("failed to create Xray access token: %w", err)
+	}
+
+	return tokenResp.AccessToken, nil
+}
+
+func getXrayServiceURL(serverDetails *configCore.ServerDetails) string {
 	if configuredXrayURL := strings.TrimSpace(serverDetails.GetXrayUrl()); configuredXrayURL != "" {
 		return strings.TrimSuffix(configuredXrayURL, "/")
 	}
@@ -706,7 +784,7 @@ func getXrayServiceURL(serverDetails *config.ServerDetails) string {
 // The maliciousLookup map is populated from the Violations API response (not Events API), eliminating
 // N+1 HTTP requests. It maps issue ID → whether it's a malicious package, and is passed to output
 // functions for use in report generation.
-func generateVulnerabilityReport(conf *CheckConfiguration, serverDetails *config.ServerDetails, repoKey, imageName, tag, watchName, maliciousWatchName string) (*VulnerabilityReport, map[string]bool, error) {
+func generateVulnerabilityReport(conf *CheckConfiguration, serverDetails *configCore.ServerDetails, repoKey, imageName, tag string, xraySvc *XrayService, watchName, maliciousWatchName string) (*VulnerabilityReport, map[string]bool, error) {
 	if !conf.Silent {
 		log.Info(fmt.Sprintf("Generating vulnerability report for %s/%s:%s", repoKey, imageName, tag))
 	}
@@ -764,15 +842,15 @@ func generateVulnerabilityReport(conf *CheckConfiguration, serverDetails *config
 		}
 	}
 
-	// Step 2a: Phase 1 — Query the malicious-only watch to resolve issue IDs that count as malicious.
+	// Step 2a: Query the malicious-only watch to resolve issue IDs that count as malicious.
 	// The Violations API's own malicious_package field is unreliable, so we always use a dedicated
-	// --malicious-watch-name as the source of truth.
+	// --malicious-watch-name as the source of truth. Uses SDK-based XrayService (Phase 4).
 	maliciousLookup := make(map[string]bool)
 
 	log.Info(fmt.Sprintf("Resolving malicious issue IDs from watch: %s", conf.MaliciousWatchName))
 
 	for _, dp := range platformPaths {
-		maliciousResults, err := getArtifactSummaryVulnerabilitiesCLI(conf.ServerId, conf.ProjectKey, dp.path, conf.MaliciousWatchName)
+		maliciousResults, err := xraySvc.GetViolations(conf.MaliciousWatchName, extractRepoFromPath(dp.path), dp.path)
 		if err != nil {
 			log.Debug(fmt.Sprintf("Malicious watch query returned error for path %s: %v", dp.path, err))
 			continue
@@ -785,21 +863,19 @@ func generateVulnerabilityReport(conf *CheckConfiguration, serverDetails *config
 		log.Debug(fmt.Sprintf("Malicious watch query for path %s returned %d violation(s)", dp.path, len(maliciousResults)))
 	}
 
-	// Step 3: Query vulnerabilities for each platform path
+	// Step 3: Query vulnerabilities for each platform path using XrayService (Phase 4)
 	var lastSuccessfulViolations []violationWithMalicious
 	vulnMap := make(map[string]services.Vulnerability)
 	var successfulPath string
 	var lastDp dockerPath
 
-	// Try each Docker path format until we get vulnerability data
 	for _, dp := range platformPaths {
 		if !conf.Silent {
 			log.Info(fmt.Sprintf("Querying Xray for: %s (digests: %v)", dp.path, dp.digests))
 		}
 
-			violations, err := queryXrayViolationsViaCLIVulnerabilitiesWithMalicious(conf.ServerId, conf.ProjectKey, dp.path, "")
+		violations, err := xraySvc.GetViolations(watchName, extractRepoFromPath(dp.path), dp.path)
 		if err == nil && len(violations) > 0 {
-			// Add vulnerabilities to map (deduplicating by IssueId)
 			beforeCount := len(vulnMap)
 			for _, v := range violations {
 				if v.Vulnerability.IssueId != "" {
@@ -845,7 +921,7 @@ func generateVulnerabilityReport(conf *CheckConfiguration, serverDetails *config
 	}
 
 	if lastDp.isList {
-		report.IsMultiPlatform = true // Remember this was a multi-platform image for manifest URL construction
+		report.IsMultiPlatform = true
 	}
 	report.Platforms = append(report.Platforms, platformInfo)
 
