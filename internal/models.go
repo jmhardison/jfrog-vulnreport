@@ -58,11 +58,9 @@ type CheckConfiguration struct {
 	Output            string // Output format: "json" or "github-md"
 	Silent            bool   // Suppress all log output (used by github-md mode)
 	MinSeverity       string // Minimum severity to display: Low, Medium, High, Critical, Malicious
-	ShowFindings      bool   // Include detailed findings table in markdown output
 	DebugPaths        bool   // Log artifact discovery paths for troubleshooting
 	DockerRegistryURL string // Override URL for Docker registry (for direct manifest fetch)
 	ProjectKey        string // Xray project key for violation queries (defaults to "default")
-	WatchName         string // JFrog Xray watch name — filters violations to those relevant to the user's watch
 	MaliciousWatchName string // Required: Xray watch that defines malicious packages (source of truth for malicious detection)
 }
 
@@ -78,8 +76,7 @@ type VulnerabilityReport struct {
 	LowCount         int                         `json:"lowCount"`
 	GeneratedAt      string                      `json:"generatedAt"`
 	IsMultiPlatform   bool         `json:"isMultiPlatform,omitempty"` // true if list.manifest.json was expanded into per-platform entries
-	OrphanedMalicious []string     `json:"orphanedMalicious,omitempty"` // malicious IDs from watch not returned as violations by report watch
-	WatchFiltered     bool         `json:"-"`                           // true when --watch-name was set; gates the findings table in output
+	MaliciousIssues   []string     `json:"maliciousIssues,omitempty"` // issue IDs returned by the malicious watch
 }
 
 // PlatformVulnerabilityInfo groups vulnerabilities discovered for a single platform variant.

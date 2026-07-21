@@ -23,17 +23,15 @@ type CheckCommand struct {
 	FailOnVuln       bool   // Exit non-zero if any vulnerabilities found
 	Output           string // Output format: "json" or "github-md"
 	MinSeverity      string // Minimum severity to display: Low, Medium, High, Critical, Malicious
-	ShowFindings     bool   // Include detailed findings table in markdown output
 	DebugPaths       bool   // Log artifact discovery paths for troubleshooting
 	DockerRegistryURL string // Override URL for Docker registry (for direct manifest fetch)
 	ProjectKey       string // Xray project key for violation queries (defaults to "default")
-	WatchName        string // JFrog Xray watch name — filters violations to relevant ones
 	MaliciousWatchName string // Xray watch that defines malicious packages (source of truth)
 }
 
 // NewCheckCommand returns a CheckCommand with defaults matching the CLI flag declarations.
 func NewCheckCommand() *CheckCommand {
-	return &CheckCommand{ShowFindings: true}
+	return &CheckCommand{}
 }
 
 // SetXrayService injects a pre-built XrayService (e.g. a test mock).
@@ -58,11 +56,9 @@ func (c *CheckCommand) SetOS(v string) *CheckCommand             { c.OS = v; ret
 func (c *CheckCommand) SetFailOnVuln(v bool) *CheckCommand       { c.FailOnVuln = v; return c }
 func (c *CheckCommand) SetOutput(v string) *CheckCommand         { c.Output = v; return c }
 func (c *CheckCommand) SetMinSeverity(v string) *CheckCommand    { c.MinSeverity = v; return c }
-func (c *CheckCommand) SetShowFindings(v bool) *CheckCommand     { c.ShowFindings = v; return c }
 func (c *CheckCommand) SetDebugPaths(v bool) *CheckCommand       { c.DebugPaths = v; return c }
 func (c *CheckCommand) SetDockerRegistryURL(v string) *CheckCommand { c.DockerRegistryURL = v; return c }
 func (c *CheckCommand) SetProjectKey(v string) *CheckCommand     { c.ProjectKey = v; return c }
-func (c *CheckCommand) SetWatchName(v string) *CheckCommand      { c.WatchName = v; return c }
 func (c *CheckCommand) SetMaliciousWatchName(v string) *CheckCommand { c.MaliciousWatchName = v; return c }
 
 // Exec runs the check pipeline with all configured parameters.
@@ -88,11 +84,9 @@ func (c *CheckCommand) Exec() error {
 			Output:             output,
 			Silent:             output == "github-md",
 			MinSeverity:        c.MinSeverity,
-			ShowFindings:       c.ShowFindings,
 			DebugPaths:         c.DebugPaths,
 			DockerRegistryURL:  c.DockerRegistryURL,
 			ProjectKey:         projectKey,
-			WatchName:          c.WatchName,
 			MaliciousWatchName: c.MaliciousWatchName,
 		}
 		repoKey, imageName, tag, err := helperinternal.ParseImageName(conf.ImageName)
@@ -120,16 +114,12 @@ func (c *CheckCommand) Exec() error {
 	if c.MinSeverity != "" {
 		ctx.AddStringFlag("min-severity", c.MinSeverity)
 	}
-	ctx.AddBoolFlag("show-findings", c.ShowFindings)
 	ctx.AddBoolFlag("debug-paths", c.DebugPaths)
 	if c.DockerRegistryURL != "" {
 		ctx.AddStringFlag("docker-registry-url", c.DockerRegistryURL)
 	}
 	if c.ProjectKey != "" {
 		ctx.AddStringFlag("project-key", c.ProjectKey)
-	}
-	if c.WatchName != "" {
-		ctx.AddStringFlag("watch-name", c.WatchName)
 	}
 	if c.MaliciousWatchName != "" {
 		ctx.AddStringFlag("malicious-watch-name", c.MaliciousWatchName)
@@ -173,11 +163,9 @@ func checkCmd(c *components.Context) error {
 		SetFailOnVuln(c.GetBoolFlagValue("fail-on-vuln")).
 		SetOutput(output).
 		SetMinSeverity(c.GetStringFlagValue("min-severity")).
-		SetShowFindings(c.GetBoolFlagValue("show-findings")).
 		SetDebugPaths(c.GetBoolFlagValue("debug-paths")).
 		SetDockerRegistryURL(c.GetStringFlagValue("docker-registry-url")).
 		SetProjectKey(c.GetStringFlagValue("project-key")).
-		SetWatchName(c.GetStringFlagValue("watch-name")).
 		SetMaliciousWatchName(c.GetStringFlagValue("malicious-watch-name"))
 
 	return cmd.Exec()
@@ -220,11 +208,6 @@ func getCheckFlags() []components.Flag {
 			"Minimum severity level to display in findings (Low, Medium, High, Critical, Malicious). Summary shows all severities.",
 		),
 		components.NewBoolFlag(
-			"show-findings",
-			"Display detailed security findings table (default: true).",
-			components.WithBoolDefaultValue(true),
-		),
-		components.NewBoolFlag(
 			"debug-paths",
 			"Enable debug mode to explore repository structure.",
 			components.WithBoolDefaultValue(false),
@@ -236,10 +219,6 @@ func getCheckFlags() []components.Flag {
 		components.NewStringFlag(
 			"project-key",
 			"Xray project key for violation queries. Defaults to 'default' if not specified.",
-		),
-		components.NewStringFlag(
-			"watch-name",
-			"JFrog Xray watch name to filter violations (e.g., dockerlocal-malicious-critical). If omitted, returns all findings for the image across all watches.",
 		),
 		components.NewStringFlag(
 			"malicious-watch-name",

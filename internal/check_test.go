@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/jfrog/jfrog-client-go/xray/services"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -134,71 +133,6 @@ func TestFilterManifestsByPlatform(t *testing.T) {
 	}
 }
 
-func TestFilterVulnerabilitiesBySeverity(t *testing.T) {
-	vulnerabilities := []services.Vulnerability{
-		{
-			IssueId:  "CVE-2023-001",
-			Severity: "Low",
-		},
-		{
-			IssueId:  "CVE-2023-002",
-			Severity: "Medium",
-		},
-		{
-			IssueId:  "CVE-2023-003",
-			Severity: "High",
-		},
-		{
-			IssueId:  "CVE-2023-004",
-			Severity: "Critical",
-		},
-	}
-
-	tests := []struct {
-		name          string
-		minSeverity   string
-		expectedCount int
-	}{
-		{
-			name:          "No filter",
-			minSeverity:   "",
-			expectedCount: 4,
-		},
-		{
-			name:          "Filter by Low severity",
-			minSeverity:   "Low",
-			expectedCount: 4, // All vulnerabilities
-		},
-		{
-			name:          "Filter by Medium severity",
-			minSeverity:   "Medium",
-			expectedCount: 3, // Medium, High, Critical
-		},
-		{
-			name:          "Filter by High severity",
-			minSeverity:   "High",
-			expectedCount: 2, // High, Critical
-		},
-		{
-			name:          "Filter by Critical severity",
-			minSeverity:   "Critical",
-			expectedCount: 1, // Critical only
-		},
-		{
-			name:          "Invalid severity",
-			minSeverity:   "Invalid",
-			expectedCount: 4, // Returns all when invalid
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			maliciousLookup := map[string]bool{}
-			filtered := filterVulnerabilitiesBySeverity(vulnerabilities, tt.minSeverity, maliciousLookup)
-			assert.Equal(t, tt.expectedCount, len(filtered))
-		})
-	}
-}
 
 
 func TestGetDigestPaths(t *testing.T) {
@@ -294,50 +228,6 @@ func TestBuildXrayAPIEndpoint(t *testing.T) {
 	)
 }
 
-func TestFilterVulnerabilitiesBySeverityWithMaliciousLookup(t *testing.T) {
-	vulnerabilities := []services.Vulnerability{
-		{IssueId: "XRAY-1", Severity: "Low"},
-		{IssueId: "XRAY-2", Severity: "Medium"},
-		{IssueId: "XRAY-3", Severity: "High"},
-		{IssueId: "XRAY-4", Severity: "Critical"},
-	}
-
-	maliciousLookup := map[string]bool{
-		"XRAY-1": false,
-		"XRAY-2": true,
-		"XRAY-3": false,
-		"XRAY-4": true,
-	}
-
-	tests := []struct {
-		name          string
-		minSeverity   string
-		expectedCount int
-	}{
-		{
-			name:          "No filter",
-			minSeverity:   "",
-			expectedCount: 4,
-		},
-		{
-			name:          "Filter by Medium severity",
-			minSeverity:   "Medium",
-			expectedCount: 3, // Medium, High, Critical
-		},
-		{
-			name:          "Filter by Malicious severity — uses lookup map (no Events API)",
-			minSeverity:   "Malicious",
-			expectedCount: 2, // Only XRAY-2 and XRAY-4 are malicious
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			filtered := filterVulnerabilitiesBySeverity(vulnerabilities, tt.minSeverity, maliciousLookup)
-			assert.Equal(t, tt.expectedCount, len(filtered))
-		})
-	}
-}
 
 func TestViolationWithMaliciousExtractsFromResponse(t *testing.T) {
 	// Verify that the Violations API response parsing preserves malicious_package status.

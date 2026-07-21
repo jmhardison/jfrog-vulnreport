@@ -49,11 +49,9 @@ func RunCheckCommand(c *components.Context) error {
 		Output:            output,
 		Silent:            output == "github-md",
 		MinSeverity:       c.GetStringFlagValue("min-severity"),
-		ShowFindings:      c.GetBoolFlagValue("show-findings"),
 		DebugPaths:        c.GetBoolFlagValue("debug-paths"),
 		DockerRegistryURL: c.GetStringFlagValue("docker-registry-url"),
 		ProjectKey:        c.GetStringFlagValue("project-key"),
-		WatchName:          c.GetStringFlagValue("watch-name"),
 		MaliciousWatchName: c.GetStringFlagValue("malicious-watch-name"),
 	}
 
@@ -108,7 +106,7 @@ func RunCheckCommandFromConf(conf *CheckConfiguration, repoKey, imageName, tag, 
 		log.Info(fmt.Sprintf("Checking vulnerabilities for image: %s/%s:%s", repoKey, imageName, tag))
 	}
 
-	report, maliciousLookup, err := generateVulnerabilityReport(conf, repoKey, imageName, tag, xraySvc, artSvc, conf.WatchName, conf.MaliciousWatchName)
+	report, maliciousLookup, err := generateVulnerabilityReport(conf, repoKey, imageName, tag, xraySvc, artSvc)
 	if err != nil {
 		return fmt.Errorf("failed to generate vulnerability report: %w", err)
 	}
@@ -124,7 +122,7 @@ func RunCheckCommandFromConf(conf *CheckConfiguration, repoKey, imageName, tag, 
 		uiPortalManifestUrl = fmt.Sprintf("%s/ui/repos/tree/Xray/%s", artifactoryBaseURL, manifestPath)
 	}
 
-	if err := outputReport(report, maliciousLookup, conf.Output, uiPortalManifestUrl, conf.MinSeverity, conf.ShowFindings); err != nil {
+	if err := outputReport(report, maliciousLookup, conf.Output, uiPortalManifestUrl, conf.MinSeverity); err != nil {
 		return fmt.Errorf("failed to output report: %w", err)
 	}
 
@@ -168,113 +166,12 @@ func extractIssueType(vuln services.Vulnerability) string {
 }
 
 
-// getSeverityIcon maps a severity name to its corresponding emoji indicator.
-func getSeverityIcon(severity string) string {
-	switch strings.ToLower(severity) {
-	case "critical":
-		return "🔴"
-	case "high":
-		return "🟠"
-	case "medium":
-		return "🟡"
-	case "low":
-		return "🟢"
-	default:
-		return "⚪"
-	}
-}
-
-
-
-// filterVulnerabilitiesBySeverity filters a vulnerability list by minimum severity threshold.
-// When minSeverity is "Malicious", uses the pre-built lookup map (no Events API calls needed).
-func filterVulnerabilitiesBySeverity(vulnerabilities []services.Vulnerability, minSeverity string, maliciousLookup map[string]bool) []services.Vulnerability {
-	if minSeverity == "" {
-		return vulnerabilities
-	}
-
-	severityOrder := map[string]int{
-		"Low":       1,
-		"Medium":    2,
-		"High":      3,
-		"Critical":  4,
-		"Malicious": 5, // Highest severity level — only includes findings flagged malicious in Violations API
-	}
-
-	minLevel, exists := severityOrder[minSeverity]
-	if !exists {
-		return vulnerabilities
-	}
-
-	var filtered []services.Vulnerability
-	for _, vuln := range vulnerabilities {
-		// Check if vulnerability meets severity threshold
-		vulnLevel := 0
-		if level, exists := severityOrder[vuln.Severity]; exists {
-			vulnLevel = level
-		}
-
-		// Special case: if filtering for "Malicious", only show malicious content.
-		// Uses pre-built lookup map (no Events API calls needed).
-		if minSeverity == "Malicious" {
-			if maliciousLookup[vuln.IssueId] {
-				filtered = append(filtered, vuln)
-			}
-		} else if vulnLevel >= minLevel {
-			filtered = append(filtered, vuln)
-		}
-	}
-
-	return filtered
-}
-
 // generateSecurityBanner renders a GitHub-flavored alert banner (CAUTION/WARNING/NOTE) based on whether
-// the report contains malicious packages or any vulnerabilities. Uses pre-built lookup map for malicious
-// detection — no Events API calls needed during output formatting.
+// the report contains malicious packages or any vulnerabilities.
 func generateSecurityBanner(report *VulnerabilityReport, maliciousLookup map[string]bool, minSeverity string) {
-	// Deduplicate vulnerabilities to analyze the actual findings
-	vulnMap := make(map[string]services.Vulnerability)
-	for _, platform := range report.Platforms {
-		for _, vuln := range platform.Vulnerabilities {
-			if vuln.IssueId != "" {
-				vulnMap[vuln.IssueId] = vuln
-			}
-		}
-	}
+	hasMalicious := len(maliciousLookup) > 0 || len(report.MaliciousIssues) > 0
+	hasFindings := report.TotalIssues > 0
 
-	// Convert to slice and apply filters to match what would be displayed
-	var allVulns []services.Vulnerability
-	for _, vuln := range vulnMap {
-		allVulns = append(allVulns, vuln)
-	}
-
-	// Apply the same filtering logic used for display (uses pre-built malicious lookup instead of Events API).
-	filteredVulns := allVulns
-	if minSeverity != "" {
-		filteredVulns = filterVulnerabilitiesBySeverity(filteredVulns, minSeverity, maliciousLookup)
-	}
-
-	// Determine banner type based on filtered findings
-	hasMalicious := false
-	hasFindings := len(filteredVulns) > 0
-	// When no watch was set, violations were not queried — use summary API counts for hasFindings.
-	if !hasFindings && !report.WatchFiltered {
-		hasFindings = report.TotalIssues > 0
-	}
-
-	// Check for malicious content in filtered results using pre-built lookup (no HTTP calls).
-	for _, vuln := range filteredVulns {
-		if maliciousLookup[vuln.IssueId] {
-			hasMalicious = true
-			break
-		}
-	}
-	// Orphaned malicious IDs (in malicious-watch but not in report-watch) still warrant CAUTION.
-	if !hasMalicious && len(report.OrphanedMalicious) > 0 {
-		hasMalicious = true
-	}
-
-	// Generate appropriate banner
 	if hasMalicious {
 		// RED banner for malicious content
 		fmt.Println("---")
@@ -318,12 +215,12 @@ func generateSecurityBanner(report *VulnerabilityReport, maliciousLookup map[str
 // outputReport dispatches to the appropriate formatter based on the requested output format.
 // manifestUrl is used by github-md output to render a clickable link to the image's manifest in JFrog Platform UI —
 // no additional API calls needed, just URL construction from server config.
-func outputReport(report *VulnerabilityReport, maliciousLookup map[string]bool, output string, manifestUrl string, minSeverity string, showFindings bool) error {
+func outputReport(report *VulnerabilityReport, maliciousLookup map[string]bool, output string, manifestUrl string, minSeverity string) error {
 	switch output {
 	case "json":
 		return outputJSONReport(report, maliciousLookup)
 	case "github-md":
-		return outputMarkdownReport(report, maliciousLookup, manifestUrl, minSeverity, showFindings)
+		return outputMarkdownReport(report, maliciousLookup, manifestUrl, minSeverity)
 	default:
 		return fmt.Errorf("unsupported output format: %s. Use 'json' or 'github-md'", output)
 	}
@@ -348,9 +245,7 @@ func outputJSONReport(report *VulnerabilityReport, maliciousLookup map[string]bo
 // The malicious lookup map (built from Violations API response) is used to annotate each finding with
 // its malicious status — no additional HTTP requests needed.
 func convertToEnhancedReport(report *VulnerabilityReport, maliciousLookup map[string]bool) *EnhancedVulnerabilityReport {
-
 	typeCount := make(map[string]int)
-	maliciousCount := 0
 
 	var platforms []EnhancedPlatformInfo
 
@@ -365,9 +260,6 @@ func convertToEnhancedReport(report *VulnerabilityReport, maliciousLookup map[st
 			typeCount[issueType]++
 
 			malicious := maliciousLookup[vuln.IssueId]
-			if malicious {
-				maliciousCount++
-			}
 
 			finding := CompactFinding{
 				IssueId:   vuln.IssueId,
@@ -389,44 +281,16 @@ func convertToEnhancedReport(report *VulnerabilityReport, maliciousLookup map[st
 		platforms = append(platforms, enhancedPlatform)
 	}
 
-	// Add orphaned malicious findings (detected via malicious watch but not as regular violations).
-	var findings []CompactFinding
-	for _, p := range platforms {
-		findings = append(findings, p.Findings...)
-	}
-
-	for _, issueID := range report.OrphanedMalicious {
-		finding := CompactFinding{
-			IssueId:   issueID,
-			Type:      "Security",
-			Severity:  "Critical", // Malicious is Critical severity
-			Malicious: true,
-			CveCount:  0,
-		}
-		findings = append(findings, finding)
-		typeCount["Security"]++
-		maliciousCount++
-
-		enhancedPlatform := EnhancedPlatformInfo{
-			Platform:      report.Platforms[0].Platform, // Inherit platform info from first platform
-			FindingsCount: 1,
-			LayerCount:    0,
-			SizeMB:        0,
-			Findings:      []CompactFinding{finding},
-		}
-		platforms = append(platforms, enhancedPlatform)
-	}
-
 	return &EnhancedVulnerabilityReport{
 		ImageName:   report.ImageName,
 		GeneratedAt: report.GeneratedAt,
 		Summary: SecuritySummary{
-			TotalFindings:  report.TotalIssues + len(report.OrphanedMalicious),
+			TotalFindings:  report.TotalIssues,
 			CriticalCount:  report.CriticalCount,
 			HighCount:      report.HighCount,
 			MediumCount:    report.MediumCount,
 			LowCount:       report.LowCount,
-			MaliciousCount: maliciousCount,
+			MaliciousCount: len(maliciousLookup),
 			PlatformCount:  len(report.Platforms),
 		},
 		IssueTypes: typeCount,
@@ -434,26 +298,14 @@ func convertToEnhancedReport(report *VulnerabilityReport, maliciousLookup map[st
 	}
 }
 
-// isOrphaned checks whether an issue ID was found in the malicious-only watch but not returned as a violation.
-func isOrphaned(orphanedMalicious []string, issueID string) bool {
-	for _, id := range orphanedMalicious {
-		if id == issueID {
-			return true
-		}
-	}
-	return false
-}
-
 // outputMarkdownReport generates a GitHub-flavored markdown security report. Uses the pre-built malicious
 // lookup map (no Events API calls) for per-finding malicious status and summary counts. The manifestUrl
 // parameter is used to render a clickable link to the image's manifest in JFrog Platform UI —
 // constructed as <baseUrl>/ui/repos/tree/General/<repo>/<path>/list.manifest.json without additional HTTP requests.
-func outputMarkdownReport(report *VulnerabilityReport, maliciousLookup map[string]bool, manifestUrl string, minSeverity string, showFindings bool) error {
+func outputMarkdownReport(report *VulnerabilityReport, maliciousLookup map[string]bool, manifestUrl string, minSeverity string) error {
 	fmt.Printf("# Xray Security Report\n\n")
 	fmt.Printf("## %s\n\n", report.ImageName)
 
-	// Render a clickable link to the image's manifest in JFrog Platform UI so users can view their image directly.
-	// The URL is pre-constructed from server config — no additional API calls needed.
 	if manifestUrl != "" {
 		fmt.Printf("> **View manifest:** [%s](%s)\n\n", report.ImageName, manifestUrl)
 	}
@@ -462,47 +314,12 @@ func outputMarkdownReport(report *VulnerabilityReport, maliciousLookup map[strin
 
 	generateSecurityBanner(report, maliciousLookup, minSeverity)
 
-	// Security Summary with counts
 	fmt.Println("## Security Summary")
 
-	// Deduplicate vulnerabilities across all platforms for accurate counting and display
-	vulnMap := make(map[string]services.Vulnerability)
-
-	for _, platform := range report.Platforms {
-		for _, vuln := range platform.Vulnerabilities {
-			// Use Xray ID as key to ensure each unique vulnerability is counted only once
-			if vuln.IssueId != "" {
-				vulnMap[vuln.IssueId] = vuln
-			}
-		}
-	}
-
-	maliciousCount := 0
-	for issueID, malicious := range maliciousLookup {
-		if _, exists := vulnMap[issueID]; exists && malicious {
-			maliciousCount++
-		}
-	}
-
-	typeCount := make(map[string]int)
-
-	// Now count the unique vulnerabilities
-	for _, vuln := range vulnMap {
-		// Extract type information if available
-		issueType := extractIssueType(vuln)
-		if issueType != "" {
-			typeCount[issueType]++
-		} else {
-			typeCount["Security"]++ // Default for vulnerabilities
-		}
-
-	}
-
-	uniqueVulnCount := len(vulnMap)
+	maliciousCount := len(report.MaliciousIssues)
 	fmt.Printf("- **Total Findings:** %d\n", report.TotalIssues)
 	fmt.Printf("- **Critical:** %d | **High:** %d | **Medium:** %d | **Low:** %d\n",
 		report.CriticalCount, report.HighCount, report.MediumCount, report.LowCount)
-	maliciousCount += len(report.OrphanedMalicious)
 	fmt.Printf("- **Malicious:** %d\n", maliciousCount)
 	fmt.Printf("- **Platforms Scanned:** %d\n", len(report.Platforms))
 	if len(report.Platforms) > 0 {
@@ -515,119 +332,28 @@ func outputMarkdownReport(report *VulnerabilityReport, maliciousLookup map[strin
 		fmt.Println()
 	}
 
-	// Break out malicious findings into a dedicated section at the top.
-	totalMaliciousCount := maliciousCount
-	if totalMaliciousCount > 0 {
+	if maliciousCount > 0 {
 		fmt.Println()
 		fmt.Println("---")
 		fmt.Println()
-		// Collect regular malicious findings (present in both the report watch AND malicious-only watch).
-		maliciousVulns := make(map[string]services.Vulnerability)
-		for issueID, malicious := range maliciousLookup {
-			if vuln, exists := vulnMap[issueID]; exists && malicious {
-				maliciousVulns[issueID] = vuln
-			}
-		}
-		fmt.Printf("## :bangbang: Malicious Findings (%d)\n", totalMaliciousCount)
+		fmt.Printf("## :bangbang: Malicious Findings (%d)\n", maliciousCount)
 		fmt.Println("| Xray ID | Severity |")
 		fmt.Println("|---------|----------|")
-		type sortedItem struct {
-			id   string
-			vuln services.Vulnerability
-		}
-		var items []sortedItem
-		for id, vuln := range maliciousVulns {
-			items = append(items, sortedItem{id, vuln})
-		}
-		// Also include orphans (only in malicious-only watch, not in report watch)
-		for _, oid := range report.OrphanedMalicious {
-			items = append(items, sortedItem{id: oid, vuln: services.Vulnerability{}})
-		}
-		for i := 0; i < len(items); i++ {
-			for j := i + 1; j < len(items); j++ {
-				if items[i].id > items[j].id {
-					items[i], items[j] = items[j], items[i]
+		sorted := make([]string, len(report.MaliciousIssues))
+		copy(sorted, report.MaliciousIssues)
+		for i := 0; i < len(sorted); i++ {
+			for j := i + 1; j < len(sorted); j++ {
+				if sorted[i] > sorted[j] {
+					sorted[i], sorted[j] = sorted[j], sorted[i]
 				}
 			}
 		}
-		for _, it := range items {
-			if isOrphaned(report.OrphanedMalicious, it.id) {
-				fmt.Printf("| %s | Malicious (detected via malicious-only watch) |\n", it.id)
-			} else {
-				fmt.Printf("| %s | Malicious |\n", it.id)
-			}
+		for _, id := range sorted {
+			fmt.Printf("| %s | Malicious |\n", id)
 		}
 		fmt.Println()
 		fmt.Println("---")
 		fmt.Println()
-	}
-	// Display consolidated findings table — only when --watch-name was set.
-	// Without a watch, violations are not queried so there is nothing to display here;
-	// the Security Summary counts above (from the summary API) give the full picture.
-	if showFindings && report.WatchFiltered {
-		if uniqueVulnCount > 0 {
-			// Convert map to slice for filtering
-			var allVulns []services.Vulnerability
-			for _, vuln := range vulnMap {
-				allVulns = append(allVulns, vuln)
-			}
-
-			// Apply filtering to displayed findings (not to summary counts)
-			filteredVulns := allVulns
-
-			// Apply severity filtering
-			if minSeverity != "" {
-				filteredVulns = filterVulnerabilitiesBySeverity(filteredVulns, minSeverity, maliciousLookup)
-			}
-
-			fmt.Println("## Security Findings")
-
-			// Build filter description
-			var filterDesc []string
-			if minSeverity != "" {
-				filterDesc = append(filterDesc, fmt.Sprintf("min-severity: %s", minSeverity))
-			}
-
-			if len(filterDesc) > 0 {
-				fmt.Printf("📊 **%d vulnerabilities found** | 🔽 **%d displayed** (%s) | 📁 **%d platform(s)**\n\n",
-					uniqueVulnCount, len(filteredVulns), strings.Join(filterDesc, ", "), len(report.Platforms))
-			} else {
-				fmt.Printf("📊 **%d unique vulnerabilities found across %d platform(s)**\n\n",
-					uniqueVulnCount, len(report.Platforms))
-			}
-
-			if len(filteredVulns) > 0 {
-				// Consolidated findings table
-				fmt.Println("| Xray ID | Type | Severity |")
-				fmt.Println("|---------|------|----------|")
-
-				for _, vuln := range filteredVulns {
-					issueType := extractIssueType(vuln)
-					if issueType == "" {
-						issueType = "Security"
-					}
-
-					severityIcon := getSeverityIcon(vuln.Severity)
-
-					fmt.Printf("| %s | %s | %s %s |\n",
-					vuln.IssueId,
-					issueType,
-					severityIcon,
-					vuln.Severity)
-				}
-				fmt.Println()
-			} else {
-				if len(filterDesc) > 0 {
-					fmt.Printf("🔽 **No vulnerabilities match filters: %s**\n\n", strings.Join(filterDesc, ", "))
-				} else {
-					fmt.Printf("🔽 **No vulnerabilities to display**\n\n")
-				}
-			}
-		} else {
-			fmt.Println("## Security Findings")
-			fmt.Println("✅ **No security issues found**")
-			fmt.Println()
-		}
 	}
 
 	return nil
@@ -711,16 +437,12 @@ func newArtifactoryService(serverDetails *configCore.ServerDetails) (*Artifactor
 
 // generateVulnerabilityReport orchestrates the full vulnerability query pipeline:
 //  1. Discovers artifact paths via Artifactory search (handles both single and multi-platform images)
-//  2. Queries Xray Violations API for each platform path (scoped to watchName if set, or all violations if empty)
-//  3. Builds a malicious lookup map from the dedicated malicious watch (always scoped)
-//  4. Aggregates vulnerability counts across all platforms
+//  2. Queries the malicious watch to build a lookup map of known malicious issue IDs
+//  3. Calls the Xray summary API to get total/severity counts (not watch-scoped)
 //
-// When watchName is empty, the Violations API returns all findings for the artifact across all watches —
-// the unfiltered view. Pass a specific watch name to narrow results to that watch's configured policies.
-// The maliciousLookup map is populated from the Violations API response (not Events API), eliminating
-// N+1 HTTP requests. It maps issue ID → whether it's a malicious package, and is passed to output
-// functions for use in report generation.
-func generateVulnerabilityReport(conf *CheckConfiguration, repoKey, imageName, tag string, xraySvc *XrayService, artSvc *ArtifactoryService, watchName, maliciousWatchName string) (*VulnerabilityReport, map[string]bool, error) {
+// The maliciousLookup map maps issue ID → true for every issue ID returned by the malicious watch.
+// Summary counts are used for the Security Summary section in both JSON and markdown output.
+func generateVulnerabilityReport(conf *CheckConfiguration, repoKey, imageName, tag string, xraySvc *XrayService, artSvc *ArtifactoryService) (*VulnerabilityReport, map[string]bool, error) {
 	if !conf.Silent {
 		log.Info(fmt.Sprintf("Generating vulnerability report for %s/%s:%s", repoKey, imageName, tag))
 	}
@@ -778,8 +500,7 @@ func generateVulnerabilityReport(conf *CheckConfiguration, repoKey, imageName, t
 		}
 	}
 
-	// Initialize lastDp and IsMultiPlatform from discovered paths before any API calls,
-	// so both are set even when watchName is empty and the violations loop is skipped.
+	// Initialize lastDp from the last discovered path to carry platform metadata into the report.
 	var lastDp dockerPath
 	if len(platformPaths) > 0 {
 		lastDp = platformPaths[len(platformPaths)-1]
@@ -869,67 +590,12 @@ func generateVulnerabilityReport(conf *CheckConfiguration, repoKey, imageName, t
 		report.LowCount = summaryCounts.Low
 	}
 
-	// Step 3: Query violations for each platform path (only when --watch-name is set).
-	// When watchName is empty, violations are not queried and the findings table is suppressed;
-	// the summary counts above (from the summary API) give the full vulnerability picture.
-	vulnMap := make(map[string]services.Vulnerability)
-	var successfulPath string
-
-	if watchName != "" {
-		report.WatchFiltered = true
-		for _, dp := range platformPaths {
-			if !conf.Silent {
-				log.Info(fmt.Sprintf("Querying Xray for: %s (digests: %v)", dp.path, dp.digests))
-			}
-
-			lastDp = dp
-
-			violations, err := xraySvc.GetViolations(watchName, extractRepoFromPath(dp.path), dp.path, conf.ProjectKey)
-			if err != nil {
-				log.Warn(fmt.Sprintf("Violations query returned error for path %s: %v", dp.path, err))
-				continue
-			}
-			if len(violations) > 0 {
-				beforeCount := len(vulnMap)
-				for _, v := range violations {
-					if v.Vulnerability.IssueId != "" {
-						vulnMap[v.Vulnerability.IssueId] = v.Vulnerability
-					}
-				}
-				if successfulPath == "" {
-					successfulPath = dp.path
-				}
-				if !conf.Silent {
-					log.Info(fmt.Sprintf("Found %d vulnerabilities with path: %s", len(violations), dp.path))
-					log.Info(fmt.Sprintf("Added %d new unique vulnerabilities (total unique: %d)", len(vulnMap)-beforeCount, len(vulnMap)))
-				}
-			} else {
-				if !conf.Silent {
-					log.Debug(fmt.Sprintf("No data found for path: %s", dp.path))
-				}
-			}
-		}
-	}
-
-	// Convert map back to slice for processing
-	var allVulns []services.Vulnerability
-	for _, vuln := range vulnMap {
-		allVulns = append(allVulns, vuln)
-	}
-
-	// Add platform info to report
-	if !conf.Silent && successfulPath != "" {
-		log.Info(fmt.Sprintf("Successfully generated report with %d vulnerabilities from path: %s",
-			len(allVulns), successfulPath))
-	}
-
 	var manifestDigest string
 	if len(lastDp.digests) > 0 {
 		manifestDigest = lastDp.digests[0]
 	}
 	platformInfo := PlatformVulnerabilityInfo{
-		Vulnerabilities: allVulns,
-		ManifestDigest:  manifestDigest,
+		ManifestDigest: manifestDigest,
 		Platform: Platform{
 			OS:           lastDp.os,
 			Architecture: lastDp.arch,
@@ -937,18 +603,8 @@ func generateVulnerabilityReport(conf *CheckConfiguration, repoKey, imageName, t
 	}
 	report.Platforms = append(report.Platforms, platformInfo)
 
-	// Compute orphaned malicious IDs: found in malicious watch but not in any report watch violation.
-	if len(maliciousLookup) > 0 {
-		orphanedMalicious := make([]string, 0)
-		for issueID := range maliciousLookup {
-			if _, exists := vulnMap[issueID]; !exists {
-				orphanedMalicious = append(orphanedMalicious, issueID)
-			}
-		}
-		if len(orphanedMalicious) > 0 {
-			log.Info(fmt.Sprintf("Found %d malicious issue(s) not returned by report watch (only in malicious-only watch): %v", len(orphanedMalicious), orphanedMalicious))
-		}
-		report.OrphanedMalicious = orphanedMalicious
+	for issueID := range maliciousLookup {
+		report.MaliciousIssues = append(report.MaliciousIssues, issueID)
 	}
 
 	return report, maliciousLookup, nil
