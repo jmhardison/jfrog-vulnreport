@@ -200,42 +200,6 @@ func TestFilterVulnerabilitiesBySeverity(t *testing.T) {
 	}
 }
 
-func TestGetDockerRegistryPaths(t *testing.T) {
-	tests := []struct {
-		name             string
-		repoKey          string
-		imageName        string
-		tag              string
-		expectedList     string
-		expectedManifest string
-	}{
-		{
-			name:             "Simple image",
-			repoKey:          "docker-local",
-			imageName:        "myapp",
-			tag:              "latest",
-			expectedList:     "docker-local/myapp/latest/list.manifest.json",
-			expectedManifest: "docker-local/myapp/latest/manifest.json",
-		},
-		{
-			name:             "Namespaced image",
-			repoKey:          "docker-local",
-			imageName:        "team/myapp",
-			tag:              "v1.2.3",
-			expectedList:     "docker-local/team/myapp/v1.2.3/list.manifest.json",
-			expectedManifest: "docker-local/team/myapp/v1.2.3/manifest.json",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			paths := GetDockerRegistryPaths(tt.repoKey, tt.imageName, tt.tag)
-
-			assert.Equal(t, tt.expectedList, paths["list_manifest"])
-			assert.Equal(t, tt.expectedManifest, paths["manifest"])
-		})
-	}
-}
 
 func TestGetDigestPaths(t *testing.T) {
 	tests := []struct {

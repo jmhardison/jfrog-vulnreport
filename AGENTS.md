@@ -29,28 +29,28 @@ go build -o jfrog-vulnreport . && jf plugin install jfrog-vulnreport  # Install 
 ## Architecture Notes
 
 - **Single command**: `check` — no subcommands planned
-- **Output formats**: `json` (default, enhanced report with image metadata/counts), `github-md` (silent markdown for GitHub CI)
-- Image tag input → digest mapping resolved via Xray API; digests map to cached scan artifacts by `(scanType, sha256)`
+- **Output formats**: `json` (default, enhanced report with image metadata/counts), `github-md` (GitHub-flavored markdown with alert banners for CI pipelines)
+- Image tag input → AQL search → manifest discovery → Violations API query per platform
 
 ### Code Organization & File Responsibilities
 
 **Entry point**: `main.go` — registers plugin with `github.com/jfrog/jfrog-cli-core/v2/plugins`, declares build time (`internal.BuildTime`) and version (`internal.Version`).
 
-**CLI command**: `commands/check.go:22-30` — single file, contains all CLI flags (+argument), argument/flag/env registration functions. Delegates to the internal runner via `helperinternal.RunCheckCommand(c)`. Any new command must register in main.go with both CLI args and env vars (currently unregistered).
+**CLI command**: `commands/check.go` — `CheckCommand` struct with fluent setters for all flags. `GetCheckCommand()` registers the CLI command; `checkCmd()` reads framework flags into `CheckCommand` fields and calls `Exec()`. `NewCheckCommand()` initializes `ShowFindings: true` to match the CLI-declared default. Any new flag must be registered in both `getCheckFlags()` and `Exec()`.
 
-**Internal logic**: `/internal/` package contains business logic split across four files:
-- `check_runner.go` — main command implementation, orchestrates Xray calls and report generation. Contains `RunCheckCommand`, `generateVulnerabilityReport`, output formatters (`outputJSONReport`, `outputMarkdownReport`), severity filtering, and malicious detection via Violations API lookup map.
-- `models.go` — Go types matching Xray JSON payloads (`DockerManifest`, `VulnerabilityReport`, `EnhancedVulnerabilityReport`, `CompactFinding`). Also defines the `DockerRegistryClient` for manifest retrieval.
-- `helpers.go` — pure utilities: platform-based manifest filtering, Docker registry path construction, digest path generation, manifest content validation.
-- `docker_paths.go` — Docker image path discovery using list.manifest.json pattern with multi-platform support. Contains `discoverImageArtifacts`, `FilterManifestsByPlatform`.
-- `xray_cli.go` — JFrog CLI subprocess wrappers for Xray API calls (bypasses JWT audience restrictions). Defines the `violationWithMalicious` struct and `queryXrayViolationsViaCLIVulnerabilitiesWithMalicious` function that extracts malicious_package status from the Violations response.
+**Internal logic**: `/internal/` package contains business logic split across five files:
+- `check_runner.go` — main command implementation; `RunCheckCommand` orchestrates auth, service creation, and report generation. `generateVulnerabilityReport` handles dual-path discovery, Violations API queries for all platforms (no early break), malicious lookup map construction, and severity aggregation. Output formatters: `outputJSONReport`, `outputMarkdownReport` (emits GitHub alert banners via `generateSecurityBanner`).
+- `models.go` — Go types matching Xray/Artifactory JSON payloads (`DockerManifest`, `ManifestList`, `VulnerabilityReport`, `EnhancedVulnerabilityReport`, `CompactFinding`).
+- `helpers.go` — pure utilities: `GetDigestPaths`, `extractRepoFromPath`, `IsValidManifestContent`.
+- `docker_paths.go` — Docker image path discovery. `discoverImageArtifacts` uses AQL search via `ArtifactoryService`; `expandListManifest` builds per-platform paths as `<repo>/<image>/<tag>/sha256__<digest>/manifest.json`; `FilterManifestsByPlatform` filters by os/arch.
+- `xray_sdk.go` — SDK service wrappers. `XrayService` wraps `*jfroghttpclient.JfrogHttpClient` for Xray Violations API calls (`GetViolations`). `ArtifactoryService` wraps the same client type for Artifactory AQL search (`SearchArtifacts`) and raw artifact fetch (`FetchArtifactBody`). Both mirror the `XscInnerService` pattern from `jfrog-client-go`. Also defines `xrayViolation`, `xrayViolationInfo`, `violationWithMalicious`, and `extractCwesFromProperties`.
 
 **Build / install**: go build + jfrog CLI installation flow; plugin registered with framework via `github.com/jfrog/jfrog-cli-core/v2/plugins`. Plugin name: `jfrog-vulnreport` (lowercase + numbers/dashes, max 30 chars).
 
 ## Testing & Publishing
 
 - Add tests before publishing — GitHub Actions runs `go vet ./... && go test ./...` and checks for test coverage
-- Tests live in the same `_test.go` files alongside their source packages (`internal/check_test.go`)
+- Tests live in the same `_test.go` files alongside their source packages (`internal/check_test.go`, `internal/xray_sdk_test.go`)
 
 ### Publishing to Registry
 
@@ -79,28 +79,32 @@ cd /jfrog-vulnreport && go build -o jfrog-vulnreport . && jf plugin create --fil
 
 ## Architecture: Xray Query Pipeline (IMPORTANT)
 
-### Three-Layer System
+### Two-Layer System
 
-| Layer | System | Purpose | API to Use |
-|-------|--------|---------|------------|
-| 1 | **Artifactory** | Stores Docker manifests/blobs | `jf rt search` (REST API) |
-| 2 | **Xray Violations** | Returns violation details with CVEs, severity, remediation, AND malicious_package status | `jf xr curl /api/v1/violations` |
+| Layer | System | Purpose | How we call it |
+|-------|--------|---------|----------------|
+| 1 | **Artifactory** | Stores Docker manifests/blobs | `ArtifactoryService.SearchArtifacts` (AQL via `POST /api/search/aql`) |
+| 2 | **Xray Violations** | Returns violation details with CVEs, severity, AND malicious_package status | `XrayService.GetViolations` (direct SDK `SendPost` to `/api/v1/violations`) |
 
 ### Workflow
 
 ```
-1. Search Artifactory for manifest files:
-   jf rt search "<repo>/<image>/<tag>/*"
-   → Extract sha256 digest from path or docker.manifest.digest property
+1. Search Artifactory for manifest files using AQL:
+   POST <artifactoryUrl>/api/search/aql
+   Body (text/plain): items.find({"repo":"<repo>","$or":[{"path":"<image>/<tag>"},{"path":{"$match":"<image>/<tag>/*"}}]}).include(...)
+   → Returns [{repo, path, name, sha256, properties}] — reconstruct full path as repo/path/name
 
-2. Query Xray Violations API with artifact path (NOT SummaryService):
-   POST /api/v1/violations?projectKey=default
-   Body: {"filters": {"resources": {"artifacts": [{"repo": "...", "path": "..."}]}, "include_details": true}}
-   → Returns rich violation data including CVEs, severity, remediation, AND malicious_package per violation
+2. Classify manifests:
+   - list.manifest.json → multi-platform image (Path A)
+   - manifest.json      → single-platform image (Path B)
 
-3. Malicious package detection is extracted from the Violations response (step 2).
-   No separate Events API calls are needed — the malicious_package field is included
-   on each violation in the same response that provides vulnerability data.
+3. Query Xray Violations API for each artifact path (all platforms — no early break):
+   POST <xrayUrl>/api/v1/violations
+   Body: {"filters": {"watch_name": "...", "resources": {"artifacts": [{"repo": "...", "path": "..."}]}, "include_details": true}}
+   → Violations API expects path WITHOUT repo prefix (GetViolations strips it automatically)
+   → Returns violations[] each with malicious_package bool
+
+4. Malicious lookup map built from Violations response — no separate Events API calls needed.
 ```
 
 **Critical**: The Xray SummaryService (`/api/v1/summary/artifact`) **hangs indefinitely** for Docker images. Always use the Violations API instead.
@@ -111,95 +115,84 @@ Docker images come in two forms — **must handle both**:
 
 | Type | What exists in Artifactory | How to discover |
 |------|---------------------------|-----------------|
-| **Single-platform** | `manifest.json` only | Search Artifactory → find manifest → extract sha256 from path/props |
-| **Multi-platform** | `list.manifest.json` (with platform entries) | Search Artifactory → find list → parse component_ids for per-platform digests |
-
-#### Discovery (Search Artifactory with Wildcard)
-
-```
-1. Search Artifactory:
-   jf rt search "<repo>/<image>/<tag>/*"
-
-2. Parse JSON results — each artifact has:
-   - path: storage path (e.g., "docker-local/jmhxraytest/10/sha256__<digest>/manifest.json")
-   - sha256: content hash
-   - props.docker.manifest.digest: ["sha256:..."] (if present)
-
-3. Find manifest files in results:
-   - /list.manifest.json → multi-platform (Path A)
-   - /manifest.json (not list) → single-platform (Path B)
-
-4. Extract sha256 from path or properties, then query Xray Violations API with that path
-```
+| **Single-platform** | `manifest.json` at `<repo>/<image>/<tag>/sha256__<digest>/manifest.json` | AQL search → find manifest.json → use full Artifactory path |
+| **Multi-platform** | `list.manifest.json` at `<repo>/<image>/<tag>/list.manifest.json` | AQL search → find list → fetch body → parse per-platform digests → construct `sha256__<digest>/manifest.json` paths |
 
 #### Path A: Multi-Platform (list.manifest.json found)
 
 ```
-1. Parse list.manifest.json body to get per-platform entries:
-   GET /api/v1/artifact/get?path=<repo>/<image>/<tag>/list.manifest.json
-
-2. Each entry has: digest, platform.os, platform.architecture
-
-3. For each platform digest, query Xray Violations API:
-   POST /api/v1/violations?projectKey=default
-   Body: {"filters": {"resources": {"artifacts": [{"repo": "...", "path": "..."}]}}}
+1. AQL search finds list.manifest.json
+2. Fetch list.manifest.json body via ArtifactoryService.FetchArtifactBody
+3. Parse ManifestList to get per-platform entries (digest, os, architecture)
+4. Build per-platform Artifactory path: <repo>/<image>/<tag>/sha256__<digest>/manifest.json
+   CRITICAL: use sha256__<digest>/manifest.json, NOT manifests/<digest> (Docker registry API format)
+5. Query Xray Violations API for EACH platform path (accumulate all results — no break)
 ```
 
 #### Path B: Single-Platform (manifest.json found)
 
 ```
-1. Extract sha256 from path or properties
-
-2. Query Xray Violations API with that path:
-   POST /api/v1/violations?projectKey=default
-   Body: {"filters": {"resources": {"artifacts": [{"repo": "...", "path": "..."}]}}}
+1. AQL search finds manifest.json directly
+2. Use the full artifact path returned by AQL
+3. Query Xray Violations API with that path
 ```
 
-### CLI Wrapper Approach (JWT Bypass)
+### SDK-Based API Calls
 
-All Xray API calls go through `jf xr curl` subprocess commands in `internal/xray_cli.go`. Direct SDK client calls fail with 401 due to JWT audience restrictions.
+All Xray and Artifactory API calls use direct SDK HTTP client calls via `*jfroghttpclient.JfrogHttpClient`. This replaced the previous `jf xr curl` / `jf rt search` subprocess approach.
 
-**Available wrappers:**
-- `queryXrayViolationsViaCLIVulnerabilitiesWithMalicious(serverId, projectKey, artifactPath)` — Violations API (vulnerabilities + malicious_package) **← USE THIS FOR DOCKER IMAGES**
-- `queryArtifactorySearchViaCLI(serverId, pattern)` — Artifactory search API (for manifest discovery)
-- `fetchArtifactBodyViaCLI(serverId, artifactPath)` — GET raw artifact body
+**Auth initialization is required**: `common.GetServerDetails(c)` (called in `getServerDetails`) invokes `CreateInitialRefreshableTokensIfNeeded` — this must happen before creating `XrayService` or `ArtifactoryService`. The platform access token from `serverDetails` works for both Xray and Artifactory without any separate token exchange.
+
+**Service construction:**
+- `newXrayService(serverDetails)` → `serverDetails.CreateXrayAuthConfig()` → `xraySdk.New(cfg)` → `NewXrayService(mgr.Client(), xrayDetails)`
+- `newArtifactoryService(serverDetails)` → `serverDetails.CreateArtAuthConfig()` → `JfrogClientBuilder().AppendPreRequestInterceptor(...).Build()` → `NewArtifactoryService(client, artDetails)`
 
 **DO NOT use:**
-- Direct SDK Xray client calls (`xrManager.Client().SendPost`, etc.) — 401 JWT errors
+- `jf xr curl` / `jf rt search` subprocess calls — replaced by SDK; spawning subprocesses adds latency and requires a separate `jf` binary install
 - SummaryService (`/api/v1/summary/artifact`) — **hangs indefinitely for Docker images**
 
-### Malicious Package Detection (Optimization)
+### Malicious Package Detection
 
-The Violations API response already includes `malicious_package` on each violation. The code extracts this field during the initial Violations query and builds an in-memory lookup map (`map[string]bool` keyed by issue ID). All output functions use this pre-built map instead of making separate Events API calls per issue ID, eliminating N+1 HTTP requests.
+Two Xray watches are used:
+1. `--watch-name` (report watch): returns all security violations for the image
+2. `--malicious-watch-name` (malicious watch): returns only malicious package violations — used as the authoritative source for which issue IDs are malicious
+
+The malicious lookup map (`map[string]bool` keyed by issue ID) is built in `generateVulnerabilityReport` from the malicious watch query, then passed to all output functions. Issue IDs in the malicious watch but not in the report watch are tracked as `OrphanedMalicious` and rendered separately in the report.
 
 **Key types:**
-- `violationWithMalicious` (in `xray_cli.go`) — wraps `services.Vulnerability` with `MaliciousPackage bool`
+- `violationWithMalicious` (in `xray_sdk.go`) — wraps `services.Vulnerability` with `MaliciousPackage bool`
 - The lookup map is built in `generateVulnerabilityReport()` and passed to all output functions
 
 ### Project Key Flag
 
-The `--project-key` flag (defaults to `"default"`) is required for Xray Violations API queries. This allows querying violations across multiple Xray projects in a multi-project JFrog Platform setup.
+The `--project-key` flag (defaults to `"default"`) is passed in the Violations API query URL (`?projectKey=...`). Required for multi-project JFrog Platform setups.
 
 ## File Structure Summary
 
 ```
 .
-├── /commands/        -> CLI command definitions (getCheckArguments, getCheckFlags)
-│   └── check.go      -> Single file: CLI flags + arg parsing
-├── /internal/        -> Business logic layer
-│   ├── check_runner.go  -> Main command implementation, output formatting, severity filtering
-│   ├── models.go        -> Types matching Xray JSON payloads (VulnerabilityReport, CompactFinding, etc.)
-│   ├── helpers.go       -> Pure utilities: platform filtering, path construction, manifest validation
-│   ├── docker_paths.go  -> Docker image path discovery with multi-platform support via list.manifest.json
-│   └── xray_cli.go      -> CLI subprocess wrappers for Xray API calls + violationWithMalicious type
-├── main.go                   -> Entry point: registers plugin with framework, declares build time and version
-└── jfrog-vulnreport.yml     -> Plugin registry descriptor (name, summary, version, maintainers, repository)
+├── /commands/
+│   └── check.go         -> CheckCommand struct + fluent setters + Exec() bridge; GetCheckCommand() registers CLI
+├── /internal/
+│   ├── check_runner.go  -> RunCheckCommand, generateVulnerabilityReport, output formatters, severity filtering
+│   ├── models.go        -> Types: DockerManifest, ManifestList, VulnerabilityReport, EnhancedVulnerabilityReport, CompactFinding
+│   ├── helpers.go       -> GetDigestPaths, extractRepoFromPath, IsValidManifestContent
+│   ├── docker_paths.go  -> discoverImageArtifacts, expandListManifest, FilterManifestsByPlatform, rtArtifact
+│   └── xray_sdk.go      -> XrayService (GetViolations), ArtifactoryService (SearchArtifacts, FetchArtifactBody),
+│                           xrayViolation, violationWithMalicious, extractCwesFromProperties, AQL types
+├── main.go              -> Entry point: plugin registration, BuildTime, Version
+└── jfrog-vulnreport.yml -> Plugin registry descriptor
 ```
 
-### Gotchas / Lessons Learned
+## Gotchas / Lessons Learned
 
-1. Some CLI flag methods (`GetServerId`, `GetRepo`) are deprecated — use the newer API when migrating
-2. The Xray SummaryService (`/api/v1/summary/artifact`) hangs indefinitely for Docker images — always use the Violations API
-3. Direct SDK Xray client calls fail with 401 due to JWT audience restrictions — all calls must go through `jf xr curl` subprocess wrappers
-4. The Violations API returns `malicious_package` per violation — no separate Events API calls needed (extracted during initial query)
-5. Docker image path discovery uses `list.manifest.json` pattern via Xray artifact search API — this is the only reliable way to find multi-platform images in JFrog/Xray
+1. **Xray SummaryService hangs** — `/api/v1/summary/artifact` hangs indefinitely for Docker images. Always use `/api/v1/violations` instead.
+2. **Auth must be initialized before SDK use** — `common.GetServerDetails(c)` (not a bare `getServerDetails(serverId)`) triggers `CreateInitialRefreshableTokensIfNeeded`. Platform access token then works for both Xray and Artifactory without a separate token exchange.
+3. **Violations API path is without repo prefix** — `GetViolations` strips the repo prefix automatically (`"docker-local/img/tag/manifest.json"` → `"img/tag/manifest.json"`). Callers can pass either form.
+4. **Multi-platform paths use Artifactory storage format** — `sha256__<digest>/manifest.json`, NOT Docker registry API format `manifests/<digest>`. Using the wrong format causes Xray to return 0 violations silently.
+5. **Query all platforms — no early break** — for multi-platform images, `discoverImageArtifacts` returns one `dockerPath` per platform. The violations loop must query all of them and accumulate results; breaking on the first success silently drops the other platforms.
+6. **AQL requires `text/plain` content type** — the Artifactory AQL endpoint (`POST /api/search/aql`) requires `Content-Type: text/plain`, not `application/json`.
+7. **AQL path reconstruction** — AQL returns `{repo, path, name}` separately. Full artifact path is `repo + "/" + path + "/" + name`. Pass this full path to `docker_paths.go`; the repo prefix is stripped by `GetViolations` as needed.
+8. **Malicious watch errors must be visible** — log malicious watch query failures at `Warn`, not `Debug`. In github-md mode, log level is set to `ERROR`; `Debug` messages are completely invisible, leaving the malicious lookup silently empty.
+9. **`--platform linux` (no slash) sets OS, not arch** — the `--platform` flag without a slash sets `conf.OS = conf.Platform` and leaves `arch` empty. A single word is interpreted as OS only (e.g., `linux`), not architecture.
+10. **CVE properties can be string or array** — Xray may return `"cve"` as a JSON string or `[]string`. Use a type switch (see `xray_sdk.go`) to handle both; a bare `.(string)` assertion silently drops array-form CVEs.

@@ -1,6 +1,6 @@
 # Migration Plan: Replace CLI Wrappers with Direct Xray SDK Calls
 
-**Status**: Phase 7 complete — migration finished (2026-07-20)
+**Status**: All phases complete — migration finished + code review applied (2026-07-20)
 **Created**: 2026-07-20
 **Last revised**: 2026-07-20
 **Scope**: `internal/xray_cli.go` → new `internal/xray_sdk.go` + `commands/check.go` refactor + auth fix
@@ -17,6 +17,7 @@
 | 5 | Delete `xray_cli.go`; move kept types (`violationWithMalicious`, etc.) to `xray_sdk.go` | ✅ Done |
 | 6 | `go mod tidy`, build, test, vet | ✅ Done |
 | 7 | Live verification + automated tests (request shape, CWE extraction, fluent setter) | ✅ Done |
+| 8 | Code review (high effort, 8 angles) + fix 10 confirmed/plausible findings | ✅ Done |
 
 ## Goal (and constraints)
 
@@ -148,10 +149,29 @@ jf jfrog-vulnreport check docker-local/jmhxraytest:15 \
 6. ✅ Done — `go mod tidy` (no changes); `go build ./...` + `go test ./...` + `go vet ./...` all clean
 7. ✅ Done — JSON and github-md both return 25 findings / 2 malicious (XRAY-198184, XRAY-249065); 0 `jf` subprocesses confirmed via pgrep
 
+## Phase 8: Code Review Fixes (2026-07-20)
+
+High-effort review (8 finder angles, 1-vote verify per candidate). 10 findings applied:
+
+| Finding | Fix |
+|---------|-----|
+| `docker_paths.go:156` — multi-platform path used Docker registry format `manifests/<digest>` | Changed to `sha256__<digest>/manifest.json` (Artifactory storage format) |
+| `check_runner.go:850` — `break` after first successful platform | Removed; accumulates violations from all platforms |
+| `check_runner.go:783` — `--platform linux` discarded (arch = conf.OS with empty OS) | `conf.OS = conf.Platform; arch = ""` |
+| `check_runner.go:541` — malicious section gated on `len(vulnMap) > 0` | Removed gate; orphan-only malicious results now render |
+| `check_runner.go:464` — `silent := true` made `generateSecurityBanner` dead code | Removed local `silent`; banner now always emitted in github-md |
+| `commands/check.go:32` — `NewCheckCommand()` initialized `ShowFindings: false` (zero value) | Changed to `ShowFindings: true` to match CLI default |
+| `xray_sdk.go:208` — CVE as JSON array silently dropped (only string type assertion) | Changed to type switch handling both `string` and `[]interface{}` |
+| `helpers.go:11` + `docker_paths.go:21` — `GetDockerRegistryPaths` / `getDockerImagePaths` dead code | Deleted both; removed corresponding test |
+| `check_runner.go:810` — malicious watch errors logged at `Debug` | Elevated to `log.Warn` |
+| `check_runner.go:414` — verbose map-increment antipattern | `typeCount["Security"]++` |
+
+Skipped: `xray_sdk.go:177` CLAUDE.md "DO NOT use SDK" violation — REFUTED; the restriction pre-dated the migration and the SDK path is confirmed working.
+
 ## Notes for Future Work
 
 - SummaryService hangs on Docker images — NOT a fallback; ReportService is async only
 - Violations API (`/api/v1/violations`) is the correct endpoint for synchronous reads
-- `--project-key` applied via `mgr.SetProjectKey(projectKey)` at construction time
 - Watch name filtering happens in request body (`filters.watch_name`) — why `watchName` is required
 - `CheckCommand` struct makes unit testing easier: construct, call setters (incl. mock manager), call `Exec()` — no `*components.Context` plumbing needed
+- Report currently produces a single `PlatformVulnerabilityInfo` aggregating all platforms — future work could produce one entry per platform with that platform's specific violations

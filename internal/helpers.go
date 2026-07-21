@@ -6,16 +6,6 @@ import (
 	"strings"
 )
 
-
-
-func GetDockerRegistryPaths(repoKey, imageName, tag string) map[string]string {
-	base := fmt.Sprintf("%s/%s/%s", repoKey, imageName, tag)
-	return map[string]string{
-		"list_manifest": base + "/list.manifest.json",
-		"manifest":      base + "/manifest.json",
-	}
-}
-
 func GetDigestPaths(repoKey, digest string) []string {
 	normalizedDigest := strings.TrimPrefix(digest, "sha256:")
 	return []string{

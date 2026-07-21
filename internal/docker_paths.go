@@ -17,14 +17,6 @@ type dockerPath struct {
 	arch    string   // platform architecture (e.g. "amd64", "arm64") — parsed from manifest body
 }
 
-// getDockerImagePaths generates potential Docker image paths for Xray scanning.
-func getDockerImagePaths(repoKey, imageName, tag string) []string {
-	var paths []string
-	paths = append(paths, fmt.Sprintf("%s/%s/%s/list.manifest.json", repoKey, imageName, tag))
-	paths = append(paths, fmt.Sprintf("%s/%s/%s/manifest.json", repoKey, imageName, tag))
-	return paths
-}
-
 // rtArtifact represents an artifact from Artifactory search results.
 type rtArtifact struct {
 	Path   string            `json:"path"`
@@ -153,7 +145,9 @@ func expandListManifest(artSvc *ArtifactoryService, listArt *rtArtifact, repoKey
 		}
 
 		digest := strings.TrimPrefix(entry.Digest, "sha256:")
-		path := fmt.Sprintf("%s/%s/%s/manifests/%s", repoKey, imageName, tag, digest)
+		// Artifactory stores per-platform manifests under sha256__<digest>/manifest.json,
+		// not the Docker registry API format manifests/<digest>.
+		path := fmt.Sprintf("%s/%s/%s/sha256__%s/manifest.json", repoKey, imageName, tag, digest)
 
 		paths = append(paths, dockerPath{
 			path:    path,

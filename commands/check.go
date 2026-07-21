@@ -28,9 +28,9 @@ type CheckCommand struct {
 	MaliciousWatchName string // Xray watch that defines malicious packages (source of truth)
 }
 
-// NewCheckCommand returns a zero-value CheckCommand ready for fluent population.
+// NewCheckCommand returns a CheckCommand with defaults matching the CLI flag declarations.
 func NewCheckCommand() *CheckCommand {
-	return &CheckCommand{}
+	return &CheckCommand{ShowFindings: true}
 }
 
 // SetXrayServicesManager injects the authenticated Xray SDK manager.

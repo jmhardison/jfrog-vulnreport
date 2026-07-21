@@ -1,15 +1,13 @@
-// Package internal — Xray SDK helpers (Phase 3 of the migration plan).
+// Package internal — Xray and Artifactory SDK service wrappers.
 //
-// This file replaces the `jf xr curl` subprocess wrappers from xray_cli.go with direct calls
-// through the JFrog Xray SDK's HTTP client. The structure mirrors jfrog-client-go's
-// XscInnerService (xray/services/xsc/xsc.go) — a thin wrapper around an authenticated
-// *jfroghttpclient.JfrogHttpClient that exposes typed methods for Xray APIs.
+// XrayService wraps jfroghttpclient.JfrogHttpClient for Xray API calls.
+// ArtifactoryService wraps jfroghttpclient.JfrogHttpClient for Artifactory API calls.
+// Both mirror jfrog-client-go's XscInnerService pattern: an authenticated HTTP client
+// paired with ServiceDetails for header construction.
 //
-// CRITICAL: There is NO typed SDK method for synchronous reads of /api/v1/violations.
-// Confirmed by grep across jfrog-client-go@v1.55.0 — no ViolationsService, no GetViolations.
-// ReportService.Violations() creates an ASYNC report job and is not what we need.
-// The XrayService.GetViolations() method uses mgr.Client().SendPost() directly against
-// /api/v1/violations, which is the only realistic path (mirrors XscInnerService internally).
+// NOTE: There is no typed SDK method for synchronous reads of /api/v1/violations in
+// jfrog-client-go@v1.55.0. XrayService.GetViolations uses SendPost directly against
+// /api/v1/violations (mirrors XscInnerService internally).
 package internal
 
 import (
@@ -207,9 +205,17 @@ func (xs *XrayService) GetViolations(watchName, repo, path string) ([]violationW
 
 		if v.Properties != nil {
 			if propsMap, ok := v.Properties.(map[string]interface{}); ok {
-				if cveId, ok := propsMap["cve"].(string); ok && cveId != "" {
-					vuln.Cves = []xrayServices.Cve{
-						{Id: cveId, Cwe: extractCwesFromProperties(propsMap)},
+				cwes := extractCwesFromProperties(propsMap)
+				switch cve := propsMap["cve"].(type) {
+				case string:
+					if cve != "" {
+						vuln.Cves = []xrayServices.Cve{{Id: cve, Cwe: cwes}}
+					}
+				case []interface{}:
+					for _, c := range cve {
+						if s, ok := c.(string); ok && s != "" {
+							vuln.Cves = append(vuln.Cves, xrayServices.Cve{Id: s, Cwe: cwes})
+						}
 					}
 				}
 			}

@@ -411,11 +411,7 @@ func convertToEnhancedReport(report *VulnerabilityReport, maliciousLookup map[st
 			CveCount:  0,
 		}
 		findings = append(findings, finding)
-		if _, exists := typeCount["Security"]; !exists {
-			typeCount["Security"] = 1
-		} else {
-			typeCount["Security"]++
-		}
+		typeCount["Security"]++
 		maliciousCount++
 
 		enhancedPlatform := EnhancedPlatformInfo{
@@ -460,9 +456,6 @@ func isOrphaned(orphanedMalicious []string, issueID string) bool {
 // parameter is used to render a clickable link to the image's manifest in JFrog Platform UI —
 // constructed as <baseUrl>/ui/repos/tree/General/<repo>/<path>/list.manifest.json without additional HTTP requests.
 func outputMarkdownReport(report *VulnerabilityReport, maliciousLookup map[string]bool, manifestUrl string, minSeverity string, showFindings bool) error {
-	// For GitHub MD output, suppress verbose logging and banners for silent operation
-	silent := true
-
 	fmt.Printf("# Xray Security Report\n\n")
 	fmt.Printf("## %s\n\n", report.ImageName)
 
@@ -474,10 +467,7 @@ func outputMarkdownReport(report *VulnerabilityReport, maliciousLookup map[strin
 
 	fmt.Println()
 
-	// Only generate banner if not in silent mode (for CI/CD pipelines)
-	if !silent {
-		generateSecurityBanner(report, maliciousLookup, minSeverity)
-	}
+	generateSecurityBanner(report, maliciousLookup, minSeverity)
 
 	// Security Summary with counts
 	fmt.Println("## Security Summary")
@@ -515,10 +505,6 @@ func outputMarkdownReport(report *VulnerabilityReport, maliciousLookup map[strin
 
 	}
 
-	if !silent {
-		log.Info(fmt.Sprintf("📊 Malicious detection summary: Checked %d unique vulnerabilities, found %d malicious packages", len(vulnMap), maliciousCount))
-	}
-
 	uniqueVulnCount := len(vulnMap)
 	fmt.Printf("- **Total Findings:** %d\n", uniqueVulnCount)
 	fmt.Printf("- **Critical:** %d | **High:** %d | **Medium:** %d | **Low:** %d\n",
@@ -538,7 +524,7 @@ func outputMarkdownReport(report *VulnerabilityReport, maliciousLookup map[strin
 
 	// Break out malicious findings into a dedicated section at the top.
 	totalMaliciousCount := maliciousCount
-	if totalMaliciousCount > 0 && len(vulnMap) > 0 {
+	if totalMaliciousCount > 0 {
 		fmt.Println()
 		fmt.Println("---")
 		fmt.Println()
@@ -687,8 +673,8 @@ func getServerDetails(c *components.Context) (*configCore.ServerDetails, error) 
 }
 
 // newXrayService creates an XrayService from server details using the platform access token.
-// common.GetServerDetails (Phase 1) already calls CreateInitialRefreshableTokensIfNeeded so
-// the platform token in serverDetails is the same credential jf xr curl uses.
+// common.GetServerDetails already calls CreateInitialRefreshableTokensIfNeeded so the token
+// in serverDetails is ready for direct SDK use.
 func newXrayService(serverDetails *configCore.ServerDetails) (*XrayService, error) {
 	xrayDetails, err := serverDetails.CreateXrayAuthConfig()
 	if err != nil {
@@ -780,8 +766,8 @@ func generateVulnerabilityReport(conf *CheckConfiguration, repoKey, imageName, t
 				arch = parts[1]
 			} else {
 				// --platform without slash: treat entire value as OS
-				arch = conf.OS
-				conf.OS = ""
+				conf.OS = conf.Platform
+				arch = ""
 			}
 		}
 		filtered := FilterManifestsByPlatform(platformPaths, arch, conf.OS)
@@ -807,7 +793,7 @@ func generateVulnerabilityReport(conf *CheckConfiguration, repoKey, imageName, t
 	for _, dp := range platformPaths {
 		maliciousResults, err := xraySvc.GetViolations(conf.MaliciousWatchName, extractRepoFromPath(dp.path), dp.path)
 		if err != nil {
-			log.Debug(fmt.Sprintf("Malicious watch query returned error for path %s: %v", dp.path, err))
+			log.Warn(fmt.Sprintf("Malicious watch query returned error for path %s: %v", dp.path, err))
 			continue
 		}
 		for _, r := range maliciousResults {
@@ -839,7 +825,7 @@ func generateVulnerabilityReport(conf *CheckConfiguration, repoKey, imageName, t
 					vulnMap[v.Vulnerability.IssueId] = v.Vulnerability
 				}
 			}
-			lastSuccessfulViolations = violations
+			lastSuccessfulViolations = append(lastSuccessfulViolations, violations...)
 			if successfulPath == "" {
 				successfulPath = dp.path
 			}
@@ -847,7 +833,6 @@ func generateVulnerabilityReport(conf *CheckConfiguration, repoKey, imageName, t
 				log.Info(fmt.Sprintf("Found %d vulnerabilities with path: %s", len(violations), dp.path))
 				log.Info(fmt.Sprintf("Added %d new unique vulnerabilities (total unique: %d)", len(vulnMap)-beforeCount, len(vulnMap)))
 			}
-			break // Found data, stop trying more paths
 		}
 
 		if !conf.Silent {
