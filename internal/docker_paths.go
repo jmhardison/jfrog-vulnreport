@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/jfrog/jfrog-cli-core/v2/utils/config"
 	"github.com/jfrog/jfrog-client-go/utils/log"
 )
 
@@ -34,26 +33,20 @@ type rtArtifact struct {
 }
 
 // discoverImageArtifacts handles dual-path discovery for both multi-platform and single-platform images.
-// Uses Artifactory search to find manifests, then expands list.manifest.json into per-platform entries.
-func discoverImageArtifacts(serverId string, serverDetails *config.ServerDetails, repoKey, imageName, tag string) ([]dockerPath, error) {
+// Uses Artifactory AQL search to find manifests, then expands list.manifest.json into per-platform entries.
+func discoverImageArtifacts(artSvc *ArtifactoryService, repoKey, imageName, tag string) ([]dockerPath, error) {
 	// Step 1: Search Artifactory for Docker image files (manifests and blobs)
 	searchPattern := fmt.Sprintf("%s/%s/%s/*", repoKey, imageName, tag)
 	log.Info(fmt.Sprintf("Searching Artifactory for Docker artifacts: %s", searchPattern))
 
-	rtResult, err := queryArtifactorySearchViaCLI(serverId, searchPattern)
+	artifacts, err := artSvc.SearchArtifacts(searchPattern)
 	if err != nil {
 		return nil, fmt.Errorf("artifactory search failed: %w", err)
 	}
 
-	if len(rtResult) == 0 {
+	if len(artifacts) == 0 {
 		log.Debug("No artifacts found in Artifactory for this image")
 		return nil, nil
-	}
-
-	// Step 2: Parse results to find manifest files and extract sha256 digests
-	var artifacts []rtArtifact
-	if err := json.Unmarshal(rtResult, &artifacts); err != nil {
-		return nil, fmt.Errorf("failed to parse Artifactory search results: %w", err)
 	}
 
 	// Collect all manifest entries (single-platform manifests + list.manifest.json)
@@ -96,7 +89,7 @@ func discoverImageArtifacts(serverId string, serverDetails *config.ServerDetails
 	// The list manifest lives in Artifactory storage (not Xray), so we fetch its body directly from Artifactory
 	// using the SDK's authenticated HTTP client — Xray's artifact-get endpoint doesn't serve raw file content.
 	if listManifestArt != nil {
-		listPaths, err := expandListManifest(serverDetails, listManifestArt, repoKey, imageName, tag)
+		listPaths, err := expandListManifest(artSvc, listManifestArt, repoKey, imageName, tag)
 		if err != nil {
 			return nil, fmt.Errorf("failed to expand list.manifest.json: %w", err)
 		}
@@ -116,7 +109,7 @@ func discoverImageArtifacts(serverId string, serverDetails *config.ServerDetails
 // expandListManifest fetches a list.manifest.json body and expands it into per-platform dockerPath entries.
 // The list manifest is stored in Artifactory (not Xray), so we fetch its raw content from Artifactory storage
 // using the artifact's full path. Platform digests extracted here are then used as Xray query paths below.
-func expandListManifest(serverDetails *config.ServerDetails, listArt *rtArtifact, repoKey, imageName, tag string) ([]dockerPath, error) {
+func expandListManifest(artSvc *ArtifactoryService, listArt *rtArtifact, repoKey, imageName, tag string) ([]dockerPath, error) {
 	// Extract the relative artifact path (everything after the repo key) from the full Artifactory path.
 	// e.g., "docker-local/web-server/latest/list.manifest.json" → "web-server/latest/list.manifest.json"
 	relPath := listArt.Path
@@ -125,7 +118,7 @@ func expandListManifest(serverDetails *config.ServerDetails, listArt *rtArtifact
 	}
 
 	// Fetch the list manifest body from Artifactory storage (not Xray — Xray's artifact-get doesn't serve raw file content).
-	body, err := fetchArtifactoryArtifactBody(serverDetails, repoKey, relPath)
+	body, err := artSvc.FetchArtifactBody(repoKey, relPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch list.manifest.json body from Artifactory: %w", err)
 	}

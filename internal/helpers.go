@@ -26,6 +26,15 @@ func GetDigestPaths(repoKey, digest string) []string {
 	}
 }
 
+// extractRepoFromPath extracts the repository key from an artifact path.
+// Example: "docker-local/jmhxraytest/10/manifest.json" → "docker-local"
+func extractRepoFromPath(path string) string {
+	if idx := strings.IndexByte(path, '/'); idx >= 0 {
+		return path[:idx]
+	}
+	return ""
+}
+
 func IsValidManifestContent(content []byte) bool {
 	if len(content) == 0 {
 		return false

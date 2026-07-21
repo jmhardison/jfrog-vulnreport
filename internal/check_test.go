@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/jfrog/jfrog-cli-core/v2/utils/config"
 	"github.com/jfrog/jfrog-client-go/xray/services"
 	"github.com/stretchr/testify/assert"
 )
@@ -313,29 +312,6 @@ func TestIsValidManifestContent(t *testing.T) {
 	}
 }
 
-func TestGetXrayServiceURL(t *testing.T) {
-	t.Run("prefers explicit xray URL", func(t *testing.T) {
-		server := &config.ServerDetails{
-			XrayUrl:        "https://example.jfrog.io/xray/",
-			ArtifactoryUrl: "https://example.jfrog.io/artifactory",
-		}
-		assert.Equal(t, "https://example.jfrog.io/xray", getXrayServiceURL(server))
-	})
-
-	t.Run("derives from artifactory URL", func(t *testing.T) {
-		server := &config.ServerDetails{
-			ArtifactoryUrl: "https://example.jfrog.io/artifactory",
-		}
-		assert.Equal(t, "https://example.jfrog.io/xray", getXrayServiceURL(server))
-	})
-
-	t.Run("falls back to platform URL", func(t *testing.T) {
-		server := &config.ServerDetails{
-			Url: "https://example.jfrog.io/",
-		}
-		assert.Equal(t, "https://example.jfrog.io/xray", getXrayServiceURL(server))
-	})
-}
 
 func TestBuildXrayAPIEndpoint(t *testing.T) {
 	// Test URL construction logic (previously via buildXrayAPIEndpoint helper).

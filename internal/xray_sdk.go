@@ -15,11 +15,12 @@ package internal
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/jfrog/jfrog-client-go/auth"
 	"github.com/jfrog/jfrog-client-go/http/jfroghttpclient"
-	xrayServices "github.com/jfrog/jfrog-client-go/xray/services"
 	"github.com/jfrog/jfrog-client-go/utils/log"
+	xrayServices "github.com/jfrog/jfrog-client-go/xray/services"
 )
 
 // ---------------------------------------------------------------------------
@@ -45,6 +46,62 @@ type violationsResources struct {
 type violationsArtifact struct {
 	Repo string `json:"repo"`
 	Path string `json:"path"`
+}
+
+// ---------------------------------------------------------------------------
+// Violation types — canonical home after xray_cli.go deletion (Phase 5).
+// These are used by both GetViolations (XrayService) and the test suite.
+// ---------------------------------------------------------------------------
+
+// xrayViolation represents the JSON structure from Xray Violations API.
+// Each violation corresponds to a single security issue (CVE, malicious package, license, etc.).
+// The MaliciousPackage field is extracted during the initial query so no separate Events API
+// calls are needed downstream.
+type xrayViolation struct {
+	ViolationID        string          `json:"violation_id"`
+	Description        string          `json:"description"`
+	Severity           string          `json:"severity"`
+	Type               string          `json:"type"`
+	IssueID            string          `json:"issue_id"`
+	InfectedComponents []string        `json:"infected_components"`
+	InfectedVersions   []string        `json:"infected_versions"`
+	FixVersions        []string        `json:"fix_versions,omitempty"`
+	Created            string          `json:"created"`
+	MaliciousPackage   bool            `json:"malicious_package,omitempty"`
+	Properties         any             `json:"properties,omitempty"`
+	ExtendedInformation *xrayViolationInfo `json:"extended_information,omitempty"`
+}
+
+type xrayViolationInfo struct {
+	ShortDescription      string `json:"short_description"`
+	FullDescription       string `json:"full_description"`
+	JFrogResearchSeverity string `json:"jfrog_research_severity,omitempty"`
+}
+
+// extractCwesFromProperties extracts CWE IDs from violation properties.
+func extractCwesFromProperties(props map[string]any) []string {
+	var cwes []string
+	if cweRaw, ok := props["cwe"]; ok {
+		switch v := cweRaw.(type) {
+		case []any:
+			for _, c := range v {
+				if s, ok := c.(string); ok {
+					cwes = append(cwes, s)
+				}
+			}
+		case string:
+			cwes = append(cwes, v)
+		}
+	}
+	return cwes
+}
+
+// violationWithMalicious wraps a xrayServices.Vulnerability with its malicious_package flag.
+// The Violations API returns malicious_package on each violation so no separate Events API
+// calls are needed — eliminating N+1 HTTP requests.
+type violationWithMalicious struct {
+	Vulnerability    xrayServices.Vulnerability
+	MaliciousPackage bool
 }
 
 // ---------------------------------------------------------------------------
@@ -84,8 +141,17 @@ func NewXrayService(client *jfroghttpclient.JfrogHttpClient, details auth.Servic
 // without it the API returns all violations in the project, potentially thousands).
 // repo and path identify the artifact within Artifactory storage.
 func (xs *XrayService) GetViolations(watchName, repo, path string) ([]violationWithMalicious, error) {
+	if xs == nil || xs.XrayDetails == nil {
+		return nil, fmt.Errorf("XrayService not initialized")
+	}
 	if watchName == "" || repo == "" || path == "" {
 		return nil, fmt.Errorf("watchName, repo, and path are all required")
+	}
+
+	// The API expects path without the repo prefix (e.g. "jmhxraytest/15/manifest.json", not "docker-local/jmhxraytest/15/manifest.json").
+	// Strip the repo prefix if callers passed a full artifact path.
+	if strings.HasPrefix(path, repo+"/") {
+		path = path[len(repo)+1:]
 	}
 
 	req := violationsRequest{
@@ -161,4 +227,122 @@ func (xs *XrayService) GetViolations(watchName, repo, path string) ([]violationW
 		})
 	}
 	return results, nil
+}
+
+// ---------------------------------------------------------------------------
+// ArtifactoryService — thin wrapper around an authenticated Artifactory HTTP client.
+// Mirrors the XrayService pattern: JfrogHttpClient + ServiceDetails, different base URL.
+// ---------------------------------------------------------------------------
+
+// ArtifactoryService wraps an authenticated *jfroghttpclient.JfrogHttpClient and
+// provides typed methods for Artifactory REST API calls (AQL search, artifact fetch).
+type ArtifactoryService struct {
+	client     *jfroghttpclient.JfrogHttpClient
+	artDetails auth.ServiceDetails
+}
+
+// NewArtifactoryService creates an ArtifactoryService from an authenticated Artifactory HTTP client
+// and service details.
+func NewArtifactoryService(client *jfroghttpclient.JfrogHttpClient, details auth.ServiceDetails) *ArtifactoryService {
+	return &ArtifactoryService{client: client, artDetails: details}
+}
+
+// AQL response types — used by SearchArtifacts only.
+type aqlResult struct {
+	Results []aqlItem `json:"results"`
+}
+
+type aqlItem struct {
+	Repo       string    `json:"repo"`
+	Path       string    `json:"path"`
+	Name       string    `json:"name"`
+	SHA256     string    `json:"sha256"`
+	Properties []aqlProp `json:"properties"`
+}
+
+type aqlProp struct {
+	Key   string `json:"key"`
+	Value string `json:"value"`
+}
+
+// SearchArtifacts searches Artifactory for artifacts matching the given pattern using AQL.
+// Pattern format: "repo/path/to/items/*" — mirrors the former jf rt search pattern format.
+// Returns []rtArtifact in the same structure that docker_paths.go expects.
+func (as *ArtifactoryService) SearchArtifacts(pattern string) ([]rtArtifact, error) {
+	parts := strings.SplitN(pattern, "/", 2)
+	if len(parts) < 2 {
+		return nil, fmt.Errorf("invalid search pattern (expected repo/path/*): %s", pattern)
+	}
+	repo := parts[0]
+	// Trim trailing "/*" to get the base directory path for AQL matching.
+	pathBase := strings.TrimSuffix(parts[1], "/*")
+
+	// AQL: find items directly in pathBase and one level deep (sha256__<digest>/manifest.json).
+	aqlQuery := fmt.Sprintf(
+		`items.find({"repo":"%s","$or":[{"path":"%s"},{"path":{"$match":"%s/*"}}]}).include("name","repo","path","sha256","property")`,
+		repo, pathBase, pathBase,
+	)
+
+	baseURL := strings.TrimRight(as.artDetails.GetUrl(), "/")
+	url := fmt.Sprintf("%s/api/search/aql", baseURL)
+
+	log.Debug(fmt.Sprintf("[ArtifactoryService] AQL url=%s query=%s", url, aqlQuery))
+
+	httpDetails := as.artDetails.CreateHttpClientDetails()
+	// AQL endpoint expects text/plain content type (not application/json).
+	if httpDetails.Headers == nil {
+		httpDetails.Headers = make(map[string]string)
+	}
+	httpDetails.Headers["Content-Type"] = "text/plain"
+
+	resp, respBody, err := as.client.SendPost(url, []byte(aqlQuery), &httpDetails)
+	if err != nil {
+		return nil, fmt.Errorf("AQL search failed: %w", err)
+	}
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("AQL search returned status %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var result aqlResult
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, fmt.Errorf("failed to parse AQL response: %w", err)
+	}
+
+	artifacts := make([]rtArtifact, 0, len(result.Results))
+	for _, item := range result.Results {
+		props := make(map[string][]string)
+		for _, p := range item.Properties {
+			props[p.Key] = append(props[p.Key], p.Value)
+		}
+		// Reconstruct the full path (repo/path/name) to match the format rtArtifact expects.
+		artifacts = append(artifacts, rtArtifact{
+			Path:   item.Repo + "/" + item.Path + "/" + item.Name,
+			SHA256: item.SHA256,
+			Props:  props,
+		})
+	}
+	return artifacts, nil
+}
+
+// FetchArtifactBody fetches the raw content of an artifact from Artifactory storage.
+// repoKey is the repository name; artifactPath is the path within the repo (no repo prefix).
+func (as *ArtifactoryService) FetchArtifactBody(repoKey, artifactPath string) ([]byte, error) {
+	if repoKey == "" || artifactPath == "" {
+		return nil, fmt.Errorf("repoKey and artifactPath are required")
+	}
+
+	baseURL := strings.TrimRight(as.artDetails.GetUrl(), "/")
+	url := fmt.Sprintf("%s/%s/%s", baseURL, repoKey, artifactPath)
+
+	log.Debug(fmt.Sprintf("[ArtifactoryService] FetchArtifactBody url=%s", url))
+
+	httpDetails := as.artDetails.CreateHttpClientDetails()
+	resp, body, _, err := as.client.SendGet(url, false, &httpDetails)
+	if err != nil {
+		return nil, fmt.Errorf("GET artifact failed: %w", err)
+	}
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("Artifactory returned status %d for %s", resp.StatusCode, url)
+	}
+	return body, nil
 }

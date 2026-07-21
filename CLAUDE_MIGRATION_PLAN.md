@@ -1,6 +1,6 @@
 # Migration Plan: Replace CLI Wrappers with Direct Xray SDK Calls
 
-**Status**: Phase 2 complete (2026-07-20)
+**Status**: Phase 7 complete — migration finished (2026-07-20)
 **Created**: 2026-07-20
 **Last revised**: 2026-07-20
 **Scope**: `internal/xray_cli.go` → new `internal/xray_sdk.go` + `commands/check.go` refactor + auth fix
@@ -12,11 +12,11 @@
 | 0 | Verify SDK auth path works against live Xray (smoke test + wire format) | ✅ Done |
 | 1 | Fix token init: `getServerDetails(serverId)` → `common.GetServerDetails(c)` | ✅ Done |
 | 2 | Refactor to `CheckCommand` struct (mirrors `build-deps-info`) | ✅ Done |
-| 3 | Expand `xray_sdk.go` with `XrayService` + `GetViolations()` | ⏳ Next |
-| 4 | Migrate call sites (`check_runner.go`, `docker_paths.go`) to `*XrayService` | Pending |
-| 5 | Delete `xray_cli.go`; move kept types (`violationWithMalicious`, etc.) to `xray_sdk.go` | Pending |
-| 6 | `go mod tidy`, build, test, vet | Pending |
-| 7 | Live verification + automated tests (request shape, CWE extraction, fluent setter) | Pending |
+| 3 | Expand `xray_sdk.go` with `XrayService` + `GetViolations()` | ✅ Done |
+| 4 | Migrate call sites (`check_runner.go`, `docker_paths.go`) to `*XrayService` / `*ArtifactoryService` | ✅ Done |
+| 5 | Delete `xray_cli.go`; move kept types (`violationWithMalicious`, etc.) to `xray_sdk.go` | ✅ Done |
+| 6 | `go mod tidy`, build, test, vet | ✅ Done |
+| 7 | Live verification + automated tests (request shape, CWE extraction, fluent setter) | ✅ Done |
 
 ## Goal (and constraints)
 
@@ -28,14 +28,21 @@ Replace `jf xr curl` / `jf rt search` subprocess wrappers with direct SDK calls 
 
 **What we win**: ~250 lines of subprocess plumbing removed, ~90 lines of auth shims gone, no more `jf` subprocesses, testable via mocked `*jfroghttpclient.JfrogHttpClient`.
 
-## Phases 0–2 (completed)
+## Phases 0–4 (completed)
 
-Phases 0-2 are done; detailed steps have been superseded by actual implementation. Current state:
-- `internal/xray_sdk.go` — request body stubs (to be expanded in Phase 3)
+Phases 0-4 are done; detailed steps have been superseded by actual implementation. Current state:
+- `internal/xray_sdk.go` — `XrayService` + `GetViolations()` + `ArtifactoryService` + `SearchArtifacts()` + `FetchArtifactBody()`
 - `internal/xray_sdk_test.go` — two wire-format tests
 - `commands/check.go` — `CheckCommand` struct with fluent setters, `Exec()` bridge to `RunCheckCommand`
-- `internal/check_runner.go` — auth fix applied (`common.GetServerDetails(c)`)
-- Live smoke test: 2 malicious findings (`XRAY-198184`, `XRAY-249065`) across both JSON and github-md outputs.
+- `internal/check_runner.go` — auth fix (`common.GetServerDetails(c)`); `newXrayService` uses platform token directly (no `generateXrayAccessToken`); `newArtifactoryService` mirrors pattern; `generateVulnerabilityReport` accepts `*XrayService` + `*ArtifactoryService`
+- `internal/docker_paths.go` — `discoverImageArtifacts` and `expandListManifest` use `*ArtifactoryService` (AQL search + SDK fetch); no more `jf rt search` subprocess
+- Live smoke test (2026-07-20): 25 total (25 Critical), 2 malicious (`XRAY-198184`, `XRAY-249065`) via github-md output. SDK path confirmed working end-to-end.
+
+**Key fixes applied during Phase 4:**
+- `newXrayService` was silently returning empty struct — removed `generateXrayAccessToken` (which was failing); platform token from `common.GetServerDetails` works directly
+- `GetViolations` was sending path with repo prefix — added strip in `GetViolations` when path starts with `repo+"/"`
+- `lastDp = dp` was placed after `break` — moved before `break` so `platformInfo` always has a valid `dockerPath`
+- `lastDp.digests[0]` panic — guarded with len check
 
 ## Phase 3: Expand `xray_sdk.go` with `XrayService` + `GetViolations()`
 
@@ -135,11 +142,11 @@ jf jfrog-vulnreport check docker-local/jmhxraytest:15 \
 0. ✅ Done — smoke test auth path + wire format tests
 1. ✅ Done — `common.GetServerDetails(c)` verified live
 2. ✅ Done — `CheckCommand` struct + fluent setters + Exec() bridge, live test passes
-3. **Next** — Expand `XrayService` with `GetViolations()` in `xray_sdk.go`
-4. Migrate call sites in `check_runner.go` and `docker_paths.go`
-5. Delete `xray_cli.go`, move kept types, clean imports
-6. `go mod tidy`, build, test, vet
-7. Live verification + automated tests
+3. ✅ Done — `XrayService` with `GetViolations()` + `ArtifactoryService` with `SearchArtifacts()` / `FetchArtifactBody()`
+4. ✅ Done — `check_runner.go` and `docker_paths.go` fully migrated; no more CLI subprocesses; live smoke test passes (25 findings, 2 malicious)
+5. ✅ Done — `xray_cli.go` deleted; `violationWithMalicious`/`xrayViolation`/`xrayViolationInfo`/`extractCwesFromProperties` moved to `xray_sdk.go`; `extractRepoFromPath` moved to `helpers.go`; dead code removed
+6. ✅ Done — `go mod tidy` (no changes); `go build ./...` + `go test ./...` + `go vet ./...` all clean
+7. ✅ Done — JSON and github-md both return 25 findings / 2 malicious (XRAY-198184, XRAY-249065); 0 `jf` subprocesses confirmed via pgrep
 
 ## Notes for Future Work
 
