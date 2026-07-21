@@ -138,7 +138,8 @@ func NewXrayService(client *jfroghttpclient.JfrogHttpClient, details auth.Servic
 // watchName filters results to those relevant to a specific Xray watch (required;
 // without it the API returns all violations in the project, potentially thousands).
 // repo and path identify the artifact within Artifactory storage.
-func (xs *XrayService) GetViolations(watchName, repo, path string) ([]violationWithMalicious, error) {
+// projectKey scopes the query to a specific JFrog project (use "default" for the default project).
+func (xs *XrayService) GetViolations(watchName, repo, path, projectKey string) ([]violationWithMalicious, error) {
 	if xs == nil || xs.XrayDetails == nil {
 		return nil, fmt.Errorf("XrayService not initialized")
 	}
@@ -167,12 +168,20 @@ func (xs *XrayService) GetViolations(watchName, repo, path string) ([]violationW
 		return nil, fmt.Errorf("failed to marshal violations request: %w", err)
 	}
 
-	log.Info(fmt.Sprintf("[XrayService] GET /api/v1/violations url=%s repo=%s path=%s watch=%s body=%s",
-		xs.XrayDetails.GetUrl(), repo, path, watchName, string(body)))
+	baseURL := strings.TrimRight(xs.XrayDetails.GetUrl(), "/")
+	// Only scope to a specific project when explicitly requested; omitting the parameter
+	// (or passing "default") keeps the query in the global/unscoped context, which is what
+	// most single-project JFrog Platform setups require.
+	url := fmt.Sprintf("%s/api/v1/violations", baseURL)
+	if projectKey != "" && projectKey != "default" {
+		url = fmt.Sprintf("%s?projectKey=%s", url, projectKey)
+	}
+
+	log.Info(fmt.Sprintf("[XrayService] POST /api/v1/violations url=%s repo=%s path=%s watch=%s body=%s",
+		url, repo, path, watchName, string(body)))
 
 	httpDetails := xs.XrayDetails.CreateHttpClientDetails()
 	httpDetails.SetContentTypeApplicationJson()
-	url := fmt.Sprintf("%s/api/v1/violations", xs.XrayDetails.GetUrl())
 
 	resp, respBody, err := xs.client.SendPost(url, body, &httpDetails)
 	if err != nil {
@@ -251,6 +260,12 @@ type ArtifactoryService struct {
 // and service details.
 func NewArtifactoryService(client *jfroghttpclient.JfrogHttpClient, details auth.ServiceDetails) *ArtifactoryService {
 	return &ArtifactoryService{client: client, artDetails: details}
+}
+
+// ArtifactoryURL returns the base Artifactory URL with any trailing slash stripped.
+// Used by Exec() to derive the UI manifest link when services are injected for testing.
+func (as *ArtifactoryService) ArtifactoryURL() string {
+	return strings.TrimRight(as.artDetails.GetUrl(), "/")
 }
 
 // AQL response types — used by SearchArtifacts only.

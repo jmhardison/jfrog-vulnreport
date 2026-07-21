@@ -80,12 +80,16 @@ func discoverImageArtifacts(artSvc *ArtifactoryService, repoKey, imageName, tag 
 	// If we found a list.manifest.json, expand it into per-platform entries.
 	// The list manifest lives in Artifactory storage (not Xray), so we fetch its body directly from Artifactory
 	// using the SDK's authenticated HTTP client — Xray's artifact-get endpoint doesn't serve raw file content.
+	//
+	// When a list manifest is present, discard singlePlatformPaths: AQL returns both list.manifest.json
+	// and the individual sha256__<digest>/manifest.json entries, and expandListManifest generates those
+	// same sha256__ paths from the list body. Returning both would cause each platform to be queried twice.
 	if listManifestArt != nil {
 		listPaths, err := expandListManifest(artSvc, listManifestArt, repoKey, imageName, tag)
 		if err != nil {
 			return nil, fmt.Errorf("failed to expand list.manifest.json: %w", err)
 		}
-		return append(singlePlatformPaths, listPaths...), nil
+		return listPaths, nil
 	}
 
 	// Single-platform image (or no list manifest found)

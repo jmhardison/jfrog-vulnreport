@@ -10,7 +10,10 @@ import (
 // CheckCommand holds all parameters and dependencies for a vulnerability check invocation.
 // Mirrors the build-deps-info pattern: a struct with fluent setters for dependency injection.
 type CheckCommand struct {
-	xrayManager any // *xray.XrayServicesManager (typed after xray import added)
+	// Optional pre-built services — when both are set, Exec() bypasses credential lookup so
+	// callers (e.g. tests) can inject mocks without a live JFrog server.
+	xraySvc *helperinternal.XrayService
+	artSvc  *helperinternal.ArtifactoryService
 
 	// Flag values — set by fluent setters from main.go Action callback.
 	Image            string // Full image reference (e.g., "docker-local/myimage:latest")
@@ -33,10 +36,17 @@ func NewCheckCommand() *CheckCommand {
 	return &CheckCommand{ShowFindings: true}
 }
 
-// SetXrayServicesManager injects the authenticated Xray SDK manager.
-// Mirrors BuildDepsInfo.SetServicesManager in jfrog/jfrog-cli-plugins/build-deps-info.
-func (c *CheckCommand) SetXrayServicesManager(xrayManager any) *CheckCommand {
-	c.xrayManager = xrayManager
+// SetXrayService injects a pre-built XrayService (e.g. a test mock).
+// When paired with SetArtifactoryService, Exec() uses these instead of live credentials.
+func (c *CheckCommand) SetXrayService(svc *helperinternal.XrayService) *CheckCommand {
+	c.xraySvc = svc
+	return c
+}
+
+// SetArtifactoryService injects a pre-built ArtifactoryService (e.g. a test mock).
+// When paired with SetXrayService, Exec() uses these instead of live credentials.
+func (c *CheckCommand) SetArtifactoryService(svc *helperinternal.ArtifactoryService) *CheckCommand {
+	c.artSvc = svc
 	return c
 }
 
@@ -56,10 +66,43 @@ func (c *CheckCommand) SetWatchName(v string) *CheckCommand      { c.WatchName =
 func (c *CheckCommand) SetMaliciousWatchName(v string) *CheckCommand { c.MaliciousWatchName = v; return c }
 
 // Exec runs the check pipeline with all configured parameters.
+// When xraySvc and artSvc are both set (via SetXrayService/SetArtifactoryService),
+// Exec bypasses credential lookup and uses the injected services directly — enabling
+// unit tests without a live JFrog server.
 func (c *CheckCommand) Exec() error {
-	// Build a components.Context that bridges our CheckCommand fields into the
-	// internal package's expected interface. This mirrors what the framework does
-	// when wiring up Action callbacks from CLI flag parsing.
+	if c.xraySvc != nil && c.artSvc != nil {
+		output := c.Output
+		if output == "" {
+			output = "json"
+		}
+		projectKey := c.ProjectKey
+		if projectKey == "" {
+			projectKey = "default"
+		}
+		conf := &helperinternal.CheckConfiguration{
+			ImageName:          c.Image,
+			ServerId:           c.ServerId,
+			Platform:           c.Platform,
+			OS:                 c.OS,
+			FailOnVuln:         c.FailOnVuln,
+			Output:             output,
+			Silent:             output == "github-md",
+			MinSeverity:        c.MinSeverity,
+			ShowFindings:       c.ShowFindings,
+			DebugPaths:         c.DebugPaths,
+			DockerRegistryURL:  c.DockerRegistryURL,
+			ProjectKey:         projectKey,
+			WatchName:          c.WatchName,
+			MaliciousWatchName: c.MaliciousWatchName,
+		}
+		repoKey, imageName, tag, err := helperinternal.ParseImageName(conf.ImageName)
+		if err != nil {
+			return fmt.Errorf("invalid image format: %w", err)
+		}
+		return helperinternal.RunCheckCommandFromConf(conf, repoKey, imageName, tag, c.artSvc.ArtifactoryURL(), c.xraySvc, c.artSvc)
+	}
+
+	// Normal CLI path: build a components.Context and delegate to RunCheckCommand.
 	ctx := &components.Context{Arguments: []string{c.Image}}
 	if c.ServerId != "" {
 		ctx.AddStringFlag("server-id", c.ServerId)
@@ -70,9 +113,7 @@ func (c *CheckCommand) Exec() error {
 	if c.OS != "" {
 		ctx.AddStringFlag("os", c.OS)
 	}
-	if c.FailOnVuln {
-		ctx.AddBoolFlag("fail-on-vuln", true)
-	}
+	ctx.AddBoolFlag("fail-on-vuln", c.FailOnVuln)
 	if c.Output != "" {
 		ctx.AddStringFlag("output", c.Output)
 	}

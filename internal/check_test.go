@@ -52,7 +52,7 @@ func TestParseImageName(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			repo, image, tag, err := parseImageName(tt.fullImageName)
+			repo, image, tag, err := ParseImageName(tt.fullImageName)
 
 			if tt.expectError {
 				assert.Error(t, err)

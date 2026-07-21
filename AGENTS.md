@@ -165,7 +165,7 @@ The malicious lookup map (`map[string]bool` keyed by issue ID) is built in `gene
 
 ### Project Key Flag
 
-The `--project-key` flag (defaults to `"default"`) is passed in the Violations API query URL (`?projectKey=...`). Required for multi-project JFrog Platform setups.
+The `--project-key` flag is passed in the Violations API query URL (`?projectKey=...`) **only when a non-default value is explicitly set**. Omitting the parameter (or leaving it at the internal default of `"default"`) keeps the query in the global/unscoped context — required for single-project JFrog Platform setups where watches are not project-scoped. Pass a real project key only when the watch is defined inside a JFrog project.
 
 ## File Structure Summary
 
