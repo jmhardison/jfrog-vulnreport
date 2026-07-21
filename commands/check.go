@@ -239,7 +239,7 @@ func getCheckFlags() []components.Flag {
 		),
 		components.NewStringFlag(
 			"watch-name",
-			"JFrog Xray watch name to filter violations (e.g., dockerlocal-malicious-critical). Required.",
+			"JFrog Xray watch name to filter violations (e.g., dockerlocal-malicious-critical). If omitted, returns all findings for the image across all watches.",
 		),
 		components.NewStringFlag(
 			"malicious-watch-name",

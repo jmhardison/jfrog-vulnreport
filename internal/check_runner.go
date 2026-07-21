@@ -62,10 +62,6 @@ func RunCheckCommand(c *components.Context) error {
 		conf.ProjectKey = "default"
 	}
 
-	// watch-name is mandatory — users must explicitly choose which Xray watch's violations they want reported.
-	if conf.WatchName == "" {
-		return fmt.Errorf("--watch-name is required (e.g., dockerlocal-malicious-critical)")
-	}
 	if conf.MaliciousWatchName == "" {
 		return fmt.Errorf("--malicious-watch-name is required — this watch defines which issue IDs are considered malicious")
 	}
@@ -261,6 +257,10 @@ func generateSecurityBanner(report *VulnerabilityReport, maliciousLookup map[str
 	// Determine banner type based on filtered findings
 	hasMalicious := false
 	hasFindings := len(filteredVulns) > 0
+	// When no watch was set, violations were not queried — use summary API counts for hasFindings.
+	if !hasFindings && !report.WatchFiltered {
+		hasFindings = report.TotalIssues > 0
+	}
 
 	// Check for malicious content in filtered results using pre-built lookup (no HTTP calls).
 	for _, vuln := range filteredVulns {
@@ -499,7 +499,7 @@ func outputMarkdownReport(report *VulnerabilityReport, maliciousLookup map[strin
 	}
 
 	uniqueVulnCount := len(vulnMap)
-	fmt.Printf("- **Total Findings:** %d\n", uniqueVulnCount)
+	fmt.Printf("- **Total Findings:** %d\n", report.TotalIssues)
 	fmt.Printf("- **Critical:** %d | **High:** %d | **Medium:** %d | **Low:** %d\n",
 		report.CriticalCount, report.HighCount, report.MediumCount, report.LowCount)
 	maliciousCount += len(report.OrphanedMalicious)
@@ -561,8 +561,10 @@ func outputMarkdownReport(report *VulnerabilityReport, maliciousLookup map[strin
 		fmt.Println("---")
 		fmt.Println()
 	}
-	// Display consolidated findings table with optional severity filtering
-	if showFindings {
+	// Display consolidated findings table — only when --watch-name was set.
+	// Without a watch, violations are not queried so there is nothing to display here;
+	// the Security Summary counts above (from the summary API) give the full picture.
+	if showFindings && report.WatchFiltered {
 		if uniqueVulnCount > 0 {
 			// Convert map to slice for filtering
 			var allVulns []services.Vulnerability
@@ -709,12 +711,12 @@ func newArtifactoryService(serverDetails *configCore.ServerDetails) (*Artifactor
 
 // generateVulnerabilityReport orchestrates the full vulnerability query pipeline:
 //  1. Discovers artifact paths via Artifactory search (handles both single and multi-platform images)
-//  2. Queries Xray Violations API for each platform path, scoped to watch_name
-//  3. Builds a malicious lookup map from Violations response data
+//  2. Queries Xray Violations API for each platform path (scoped to watchName if set, or all violations if empty)
+//  3. Builds a malicious lookup map from the dedicated malicious watch (always scoped)
 //  4. Aggregates vulnerability counts across all platforms
 //
-// The watchName filter narrows violations to those relevant to the user's JFrog Xray watch — without it,
-// the API returns all violations in the project (potentially thousands of unrelated results).
+// When watchName is empty, the Violations API returns all findings for the artifact across all watches —
+// the unfiltered view. Pass a specific watch name to narrow results to that watch's configured policies.
 // The maliciousLookup map is populated from the Violations API response (not Events API), eliminating
 // N+1 HTTP requests. It maps issue ID → whether it's a malicious package, and is passed to output
 // functions for use in report generation.
@@ -776,6 +778,16 @@ func generateVulnerabilityReport(conf *CheckConfiguration, repoKey, imageName, t
 		}
 	}
 
+	// Initialize lastDp and IsMultiPlatform from discovered paths before any API calls,
+	// so both are set even when watchName is empty and the violations loop is skipped.
+	var lastDp dockerPath
+	if len(platformPaths) > 0 {
+		lastDp = platformPaths[len(platformPaths)-1]
+	}
+	if lastDp.isList {
+		report.IsMultiPlatform = true
+	}
+
 	// Step 2a: Query the malicious-only watch to resolve issue IDs that count as malicious.
 	// The Violations API's own malicious_package field is unreliable, so we always use a dedicated
 	// --malicious-watch-name as the source of truth. Uses SDK-based XrayService (Phase 4).
@@ -797,42 +809,104 @@ func generateVulnerabilityReport(conf *CheckConfiguration, repoKey, imageName, t
 		log.Debug(fmt.Sprintf("Malicious watch query for path %s returned %d violation(s)", dp.path, len(maliciousResults)))
 	}
 
-	// Step 3: Query vulnerabilities for each platform path using XrayService.
-	// All platforms are queried and results are deduplicated by issue ID into vulnMap —
-	// no early break, so multi-platform images accumulate violations from every platform.
-	vulnMap := make(map[string]services.Vulnerability)
-	var successfulPath string
-	var lastDp dockerPath
-
+	// Collect artifact checksums for the summary API. Strip "sha256:" prefix: single-platform
+	// digests from AQL are raw hex; multi-platform digests from list.manifest.json have the prefix.
+	var summaryChecksums []string
+	seenChecksums := make(map[string]bool)
 	for _, dp := range platformPaths {
-		if !conf.Silent {
-			log.Info(fmt.Sprintf("Querying Xray for: %s (digests: %v)", dp.path, dp.digests))
+		for _, digest := range dp.digests {
+			hex := strings.TrimPrefix(digest, "sha256:")
+			if hex != "" && !seenChecksums[hex] {
+				seenChecksums[hex] = true
+				summaryChecksums = append(summaryChecksums, hex)
+			}
 		}
+	}
 
-		lastDp = dp // always track the current platform so platformInfo below is populated
-
-		violations, err := xraySvc.GetViolations(watchName, extractRepoFromPath(dp.path), dp.path, conf.ProjectKey)
-		if err != nil {
-			log.Warn(fmt.Sprintf("Violations query returned error for path %s: %v", dp.path, err))
-			continue
-		}
-		if len(violations) > 0 {
-			beforeCount := len(vulnMap)
-			for _, v := range violations {
+	// Get severity counts from summary API (not watch-scoped — returns all vulnerabilities
+	// Xray knows about regardless of watch policy). Sets the report severity counts used by
+	// the Security Summary section in both JSON and markdown output.
+	// Note: this call can take 30-90s for large images; we time out after summaryTimeout
+	// and fall back to violations-based counts.
+	log.Info(fmt.Sprintf("Fetching vulnerability summary from Xray for %d artifact checksum(s)...", len(summaryChecksums)))
+	summaryCounts, summaryErr := xraySvc.GetSummaryByChecksums(summaryChecksums)
+	if summaryErr != nil {
+		log.Warn(fmt.Sprintf("Summary API: %v — falling back to violations-based counts", summaryErr))
+		// Fallback: query violations with no watch filter to get counts for all watched violations.
+		// This is incomplete compared to the summary API (misses unwatched vulnerabilities) but is
+		// fast and returns a meaningful count instead of zero.
+		fallbackVulnMap := make(map[string]services.Vulnerability)
+		for _, dp := range platformPaths {
+			vv, err := xraySvc.GetViolations("", extractRepoFromPath(dp.path), dp.path, conf.ProjectKey)
+			if err != nil {
+				log.Warn(fmt.Sprintf("Fallback violations query failed for %s: %v", dp.path, err))
+				continue
+			}
+			for _, v := range vv {
 				if v.Vulnerability.IssueId != "" {
-					vulnMap[v.Vulnerability.IssueId] = v.Vulnerability
+					fallbackVulnMap[v.Vulnerability.IssueId] = v.Vulnerability
 				}
 			}
-			if successfulPath == "" {
-				successfulPath = dp.path
+		}
+		report.TotalIssues = len(fallbackVulnMap)
+		for _, vuln := range fallbackVulnMap {
+			switch vuln.Severity {
+			case "Critical":
+				report.CriticalCount++
+			case "High":
+				report.HighCount++
+			case "Medium":
+				report.MediumCount++
+			case "Low":
+				report.LowCount++
 			}
+		}
+	} else {
+		report.TotalIssues = summaryCounts.Total
+		report.CriticalCount = summaryCounts.Critical
+		report.HighCount = summaryCounts.High
+		report.MediumCount = summaryCounts.Medium
+		report.LowCount = summaryCounts.Low
+	}
+
+	// Step 3: Query violations for each platform path (only when --watch-name is set).
+	// When watchName is empty, violations are not queried and the findings table is suppressed;
+	// the summary counts above (from the summary API) give the full vulnerability picture.
+	vulnMap := make(map[string]services.Vulnerability)
+	var successfulPath string
+
+	if watchName != "" {
+		report.WatchFiltered = true
+		for _, dp := range platformPaths {
 			if !conf.Silent {
-				log.Info(fmt.Sprintf("Found %d vulnerabilities with path: %s", len(violations), dp.path))
-				log.Info(fmt.Sprintf("Added %d new unique vulnerabilities (total unique: %d)", len(vulnMap)-beforeCount, len(vulnMap)))
+				log.Info(fmt.Sprintf("Querying Xray for: %s (digests: %v)", dp.path, dp.digests))
 			}
-		} else {
-			if !conf.Silent {
-				log.Debug(fmt.Sprintf("No data found for path: %s", dp.path))
+
+			lastDp = dp
+
+			violations, err := xraySvc.GetViolations(watchName, extractRepoFromPath(dp.path), dp.path, conf.ProjectKey)
+			if err != nil {
+				log.Warn(fmt.Sprintf("Violations query returned error for path %s: %v", dp.path, err))
+				continue
+			}
+			if len(violations) > 0 {
+				beforeCount := len(vulnMap)
+				for _, v := range violations {
+					if v.Vulnerability.IssueId != "" {
+						vulnMap[v.Vulnerability.IssueId] = v.Vulnerability
+					}
+				}
+				if successfulPath == "" {
+					successfulPath = dp.path
+				}
+				if !conf.Silent {
+					log.Info(fmt.Sprintf("Found %d vulnerabilities with path: %s", len(violations), dp.path))
+					log.Info(fmt.Sprintf("Added %d new unique vulnerabilities (total unique: %d)", len(vulnMap)-beforeCount, len(vulnMap)))
+				}
+			} else {
+				if !conf.Silent {
+					log.Debug(fmt.Sprintf("No data found for path: %s", dp.path))
+				}
 			}
 		}
 	}
@@ -853,8 +927,6 @@ func generateVulnerabilityReport(conf *CheckConfiguration, repoKey, imageName, t
 	if len(lastDp.digests) > 0 {
 		manifestDigest = lastDp.digests[0]
 	}
-	// allVulns is already deduplicated by issue ID via vulnMap — use it directly so
-	// per-platform severity counts and TotalIssues stay consistent.
 	platformInfo := PlatformVulnerabilityInfo{
 		Vulnerabilities: allVulns,
 		ManifestDigest:  manifestDigest,
@@ -863,28 +935,7 @@ func generateVulnerabilityReport(conf *CheckConfiguration, repoKey, imageName, t
 			Architecture: lastDp.arch,
 		},
 	}
-
-	if lastDp.isList {
-		report.IsMultiPlatform = true
-	}
 	report.Platforms = append(report.Platforms, platformInfo)
-
-	// Step 4: Calculate summary counts from all platforms
-	report.TotalIssues = len(allVulns)
-	for _, platform := range report.Platforms {
-		for _, vuln := range platform.Vulnerabilities {
-			switch vuln.Severity {
-			case "Critical":
-				report.CriticalCount++
-			case "High":
-				report.HighCount++
-			case "Medium":
-				report.MediumCount++
-			case "Low":
-				report.LowCount++
-			}
-		}
-	}
 
 	// Compute orphaned malicious IDs: found in malicious watch but not in any report watch violation.
 	if len(maliciousLookup) > 0 {

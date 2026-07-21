@@ -79,6 +79,7 @@ type VulnerabilityReport struct {
 	GeneratedAt      string                      `json:"generatedAt"`
 	IsMultiPlatform   bool         `json:"isMultiPlatform,omitempty"` // true if list.manifest.json was expanded into per-platform entries
 	OrphanedMalicious []string     `json:"orphanedMalicious,omitempty"` // malicious IDs from watch not returned as violations by report watch
+	WatchFiltered     bool         `json:"-"`                           // true when --watch-name was set; gates the findings table in output
 }
 
 // PlatformVulnerabilityInfo groups vulnerabilities discovered for a single platform variant.

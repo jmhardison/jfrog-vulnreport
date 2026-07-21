@@ -13,8 +13,8 @@ import (
 func TestViolationsRequestShape(t *testing.T) {
 	req := violationsRequest{
 		Filters: violationsFilters{
-			WatchName:      "dockerlocal-malicious-critical",
-			ViolationType:  "Security",
+			WatchName:     "dockerlocal-malicious-critical",
+			ViolationType: "Security",
 			Resources: violationsResources{
 				Artifacts: []violationsArtifact{
 					{Repo: "docker-local", Path: "jmhxraytest/15/manifest.json"},
@@ -22,13 +22,19 @@ func TestViolationsRequestShape(t *testing.T) {
 			},
 			IncludeDetails: true,
 		},
+		Pagination: violationsPagination{
+			OrderBy: "severity",
+			Limit:   100,
+			Offset:  1,
+		},
 	}
 
 	body, err := json.Marshal(req)
 	require.NoError(t, err)
 
-	// Expected shape — exact match against the XrayService.GetViolations wire format
-	expected := `{"filters":{"watch_name":"dockerlocal-malicious-critical","violation_type":"Security","resources":{"artifacts":[{"repo":"docker-local","path":"jmhxraytest/15/manifest.json"}]},"include_details":true}}`
+	// Expected shape — exact match against the XrayService.GetViolations wire format.
+	// pagination is always included so the API returns all violations, not just the first 25.
+	expected := `{"filters":{"watch_name":"dockerlocal-malicious-critical","violation_type":"Security","resources":{"artifacts":[{"repo":"docker-local","path":"jmhxraytest/15/manifest.json"}]},"include_details":true},"pagination":{"order_by":"severity","limit":100,"offset":1}}`
 	assert.JSONEq(t, expected, string(body),
 		"Request body must match the wire format Xray expects for /api/v1/violations")
 }

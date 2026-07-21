@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/jfrog/jfrog-client-go/auth"
 	"github.com/jfrog/jfrog-client-go/http/jfroghttpclient"
@@ -27,14 +28,21 @@ import (
 
 // violationsRequest is the body sent to POST /api/v1/violations.
 type violationsRequest struct {
-	Filters violationsFilters `json:"filters"`
+	Filters    violationsFilters    `json:"filters"`
+	Pagination violationsPagination `json:"pagination"`
 }
 
 type violationsFilters struct {
-	WatchName     string              `json:"watch_name"`
-	ViolationType string              `json:"violation_type"`
-	Resources     violationsResources `json:"resources"`
-	IncludeDetails bool               `json:"include_details"`
+	WatchName      string              `json:"watch_name,omitempty"`
+	ViolationType  string              `json:"violation_type"`
+	Resources      violationsResources `json:"resources"`
+	IncludeDetails bool                `json:"include_details"`
+}
+
+type violationsPagination struct {
+	OrderBy string `json:"order_by"`
+	Limit   int    `json:"limit"`
+	Offset  int    `json:"offset"`
 }
 
 type violationsResources struct {
@@ -94,6 +102,121 @@ func extractCwesFromProperties(props map[string]any) []string {
 	return cwes
 }
 
+// SeverityCounts aggregates vulnerability counts returned by the Xray summary API.
+type SeverityCounts struct {
+	Total    int
+	Critical int
+	High     int
+	Medium   int
+	Low      int
+}
+
+// summaryTimeout is the maximum time to wait for the Xray summary API to respond.
+// The /api/v1/summary/artifact endpoint can take 30-90+ seconds for images with many
+// vulnerabilities — it may trigger an on-demand scan. If it does not respond within
+// this window, GetSummaryByChecksums returns an error and severity counts will be 0.
+const summaryTimeout = 30 * time.Second
+
+// GetSummaryByChecksums queries POST /api/v1/summary/artifact with artifact checksums
+// and returns deduplicated severity counts. This call is not watch-scoped — it returns
+// all vulnerabilities Xray knows about regardless of watch policies. Results are
+// deduplicated by issue_id so a CVE present in multiple platforms is counted once.
+//
+// The call runs in a goroutine and is bounded by summaryTimeout. On timeout the function
+// returns an error; the goroutine continues running until Xray eventually responds, then
+// discards the result (safe for CLI processes that exit shortly after).
+func (xs *XrayService) GetSummaryByChecksums(checksums []string) (SeverityCounts, error) {
+	if xs == nil || xs.XrayDetails == nil {
+		return SeverityCounts{}, fmt.Errorf("XrayService not initialized")
+	}
+	if len(checksums) == 0 {
+		return SeverityCounts{}, nil
+	}
+
+	type summaryReq struct {
+		Checksums []string `json:"checksums"`
+	}
+	body, err := json.Marshal(summaryReq{Checksums: checksums})
+	if err != nil {
+		return SeverityCounts{}, fmt.Errorf("failed to marshal summary request: %w", err)
+	}
+
+	baseURL := strings.TrimRight(xs.XrayDetails.GetUrl(), "/")
+	url := fmt.Sprintf("%s/api/v1/summary/artifact", baseURL)
+
+	type result struct {
+		counts SeverityCounts
+		err    error
+	}
+	// Buffered so the goroutine can write and exit even after we've timed out.
+	ch := make(chan result, 1)
+
+	go func() {
+		httpDetails := xs.XrayDetails.CreateHttpClientDetails()
+		httpDetails.SetContentTypeApplicationJson()
+
+		resp, respBody, err := xs.client.SendPost(url, body, &httpDetails)
+		if err != nil {
+			ch <- result{SeverityCounts{}, fmt.Errorf("POST /api/v1/summary/artifact failed: %w", err)}
+			return
+		}
+		if resp.StatusCode != 200 {
+			ch <- result{SeverityCounts{}, fmt.Errorf("summary API returned status %d: %s", resp.StatusCode, string(respBody))}
+			return
+		}
+
+		type summaryIssue struct {
+			IssueID  string `json:"issue_id"`
+			Severity string `json:"severity"`
+		}
+		type summaryArtifact struct {
+			Issues []summaryIssue `json:"issues"`
+		}
+		type summaryResp struct {
+			Artifacts []summaryArtifact `json:"artifacts"`
+		}
+
+		var parsed summaryResp
+		if err := json.Unmarshal(respBody, &parsed); err != nil {
+			ch <- result{SeverityCounts{}, fmt.Errorf("failed to parse summary response: %w", err)}
+			return
+		}
+
+		// Deduplicate by issue_id across all artifacts (same CVE across multiple platforms = 1 finding).
+		seen := make(map[string]string) // issue_id → severity
+		for _, art := range parsed.Artifacts {
+			for _, issue := range art.Issues {
+				if issue.IssueID != "" {
+					seen[issue.IssueID] = issue.Severity
+				}
+			}
+		}
+
+		var counts SeverityCounts
+		counts.Total = len(seen)
+		for _, sev := range seen {
+			switch sev {
+			case "Critical":
+				counts.Critical++
+			case "High":
+				counts.High++
+			case "Medium":
+				counts.Medium++
+			case "Low":
+				counts.Low++
+			}
+		}
+		ch <- result{counts, nil}
+	}()
+
+	select {
+	case r := <-ch:
+		return r.counts, r.err
+	case <-time.After(summaryTimeout):
+		return SeverityCounts{}, fmt.Errorf("summary API did not respond within %s — severity counts will be 0 (Xray may be scanning the artifact)", summaryTimeout)
+	}
+}
+
 // violationWithMalicious wraps a xrayServices.Vulnerability with its malicious_package flag.
 // The Violations API returns malicious_package on each violation so no separate Events API
 // calls are needed — eliminating N+1 HTTP requests.
@@ -135,16 +258,16 @@ func NewXrayService(client *jfroghttpclient.JfrogHttpClient, details auth.Servic
 // vulnerability data alongside malicious_package status from the same response.
 // This is the synchronous read of POST /api/v1/violations — no async report job.
 //
-// watchName filters results to those relevant to a specific Xray watch (required;
-// without it the API returns all violations in the project, potentially thousands).
+// watchName filters results to a specific Xray watch; pass empty string to return all
+// violations for the artifact across all watches (unscoped/unfiltered view).
 // repo and path identify the artifact within Artifactory storage.
 // projectKey scopes the query to a specific JFrog project (use "default" for the default project).
 func (xs *XrayService) GetViolations(watchName, repo, path, projectKey string) ([]violationWithMalicious, error) {
 	if xs == nil || xs.XrayDetails == nil {
 		return nil, fmt.Errorf("XrayService not initialized")
 	}
-	if watchName == "" || repo == "" || path == "" {
-		return nil, fmt.Errorf("watchName, repo, and path are all required")
+	if repo == "" || path == "" {
+		return nil, fmt.Errorf("repo and path are required")
 	}
 
 	// The API expects path without the repo prefix (e.g. "jmhxraytest/15/manifest.json", not "docker-local/jmhxraytest/15/manifest.json").
@@ -153,63 +276,82 @@ func (xs *XrayService) GetViolations(watchName, repo, path, projectKey string) (
 		path = path[len(repo)+1:]
 	}
 
-	req := violationsRequest{
-		Filters: violationsFilters{
-			WatchName:     watchName,
-			ViolationType: "Security",
-			Resources: violationsResources{
-				Artifacts: []violationsArtifact{{Repo: repo, Path: path}},
-			},
-			IncludeDetails: true,
-		},
-	}
-	body, err := json.Marshal(req)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal violations request: %w", err)
-	}
-
 	baseURL := strings.TrimRight(xs.XrayDetails.GetUrl(), "/")
 	// Only scope to a specific project when explicitly requested; omitting the parameter
 	// (or passing "default") keeps the query in the global/unscoped context, which is what
 	// most single-project JFrog Platform setups require.
-	url := fmt.Sprintf("%s/api/v1/violations", baseURL)
+	apiURL := fmt.Sprintf("%s/api/v1/violations", baseURL)
 	if projectKey != "" && projectKey != "default" {
-		url = fmt.Sprintf("%s?projectKey=%s", url, projectKey)
+		apiURL = fmt.Sprintf("%s?projectKey=%s", apiURL, projectKey)
 	}
-
-	log.Info(fmt.Sprintf("[XrayService] POST /api/v1/violations url=%s repo=%s path=%s watch=%s body=%s",
-		url, repo, path, watchName, string(body)))
 
 	httpDetails := xs.XrayDetails.CreateHttpClientDetails()
 	httpDetails.SetContentTypeApplicationJson()
 
-	resp, respBody, err := xs.client.SendPost(url, body, &httpDetails)
-	if err != nil {
-		return nil, fmt.Errorf("POST /api/v1/violations failed: %w", err)
-	}
-
-	log.Info(fmt.Sprintf("[XrayService] resp status=%d body_len=%d body=%s", resp.StatusCode, len(respBody), string(respBody)))
-
-	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("Xray returned status %d: %s", resp.StatusCode, string(respBody))
-	}
-
 	type violationResponse struct {
-		TotalViolations int               `json:"total_violations"`
-		Violations      []xrayViolation   `json:"violations"`
+		TotalViolations int             `json:"total_violations"`
+		Violations      []xrayViolation `json:"violations"`
 	}
-	var parsed violationResponse
-	if err := json.Unmarshal(respBody, &parsed); err != nil {
-		return nil, fmt.Errorf("failed to parse violations response: %w", err)
+
+	// The API paginates results (default page size is 25). Fetch all pages using
+	// offset-based pagination so no violations are silently dropped.
+	const pageSize = 100
+	var allViolations []xrayViolation
+	offset := 1
+
+	for {
+		req := violationsRequest{
+			Filters: violationsFilters{
+				WatchName:      watchName,
+				ViolationType:  "Security",
+				Resources:      violationsResources{Artifacts: []violationsArtifact{{Repo: repo, Path: path}}},
+				IncludeDetails: true,
+			},
+			Pagination: violationsPagination{
+				OrderBy: "severity",
+				Limit:   pageSize,
+				Offset:  offset,
+			},
+		}
+		body, err := json.Marshal(req)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal violations request: %w", err)
+		}
+
+		log.Info(fmt.Sprintf("[XrayService] POST /api/v1/violations url=%s repo=%s path=%s watch=%s offset=%d",
+			apiURL, repo, path, watchName, offset))
+
+		resp, respBody, err := xs.client.SendPost(apiURL, body, &httpDetails)
+		if err != nil {
+			return nil, fmt.Errorf("POST /api/v1/violations failed: %w", err)
+		}
+
+		log.Info(fmt.Sprintf("[XrayService] resp status=%d body_len=%d", resp.StatusCode, len(respBody)))
+
+		if resp.StatusCode != 200 {
+			return nil, fmt.Errorf("Xray returned status %d: %s", resp.StatusCode, string(respBody))
+		}
+
+		var parsed violationResponse
+		if err := json.Unmarshal(respBody, &parsed); err != nil {
+			return nil, fmt.Errorf("failed to parse violations response: %w", err)
+		}
+
+		allViolations = append(allViolations, parsed.Violations...)
+
+		if len(allViolations) >= parsed.TotalViolations || len(parsed.Violations) < pageSize {
+			break
+		}
+		offset += pageSize
 	}
 
 	var results []violationWithMalicious
-	for _, v := range parsed.Violations {
+	for _, v := range allViolations {
 		vuln := xrayServices.Vulnerability{
 			IssueId:    v.IssueID,
 			Summary:    v.Description,
 			Severity:   v.Severity,
-			Technology: v.Type, // Store type in Technology field for downstream classification
+			Technology: v.Type,
 		}
 
 		if v.Properties != nil {
