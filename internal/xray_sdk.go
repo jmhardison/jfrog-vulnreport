@@ -13,6 +13,7 @@ package internal
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/jfrog/jfrog-client-go/auth"
@@ -112,17 +113,21 @@ type SeverityCounts struct {
 
 // SummaryIssue is a single deduplicated finding from the Xray v2 summary API.
 type SummaryIssue struct {
-	IssueID       string // Xray issue identifier (e.g. XRAY-12345)
-	Severity      string // Standard severity: Critical, High, Medium, Low
-	JFrogSeverity string // JFrog Research severity (may differ from standard); empty if not provided
-	Fixable       bool   // True if at least one affected component has a known fix version
+	IssueID       string   // Xray issue identifier (e.g. XRAY-12345)
+	Severity      string   // Standard severity: Critical, High, Medium, Low
+	JFrogSeverity string   // JFrog Research severity (may differ from standard); empty if not provided
+	Fixable       bool     // True if at least one affected component has a known fix version
+	Platforms     []string // Platform labels where this issue was found (e.g. ["linux/amd64", "linux/arm64"])
 }
 
 // GetSummaryV2 queries POST /api/v2/summary/artifact with a list of artifact paths
 // (each prefixed with the project key, e.g. "default/docker-local/img/tag/manifest.json").
+// labels is a parallel slice of platform labels (e.g. "linux/amd64") for each path — used to
+// populate SummaryIssue.Platforms so callers know which platforms each finding was detected on.
+// labels may be nil or shorter than paths; missing entries are treated as no-label.
 // Returns deduplicated severity counts and per-issue detail from Xray's indexed scan data
 // without triggering an on-demand scan.
-func (xs *XrayService) GetSummaryV2(paths []string) (SeverityCounts, []SummaryIssue, error) {
+func (xs *XrayService) GetSummaryV2(paths, labels []string) (SeverityCounts, []SummaryIssue, error) {
 	if xs == nil || xs.XrayDetails == nil {
 		return SeverityCounts{}, nil, fmt.Errorf("XrayService not initialized")
 	}
@@ -176,14 +181,44 @@ func (xs *XrayService) GetSummaryV2(paths []string) (SeverityCounts, []SummaryIs
 		return SeverityCounts{}, nil, fmt.Errorf("failed to parse v2 summary response: %w", err)
 	}
 
-	// Deduplicate by issue_id across all artifacts (same CVE in multiple platforms = 1 finding).
+	// Deduplicate by issue_id across all artifacts. For each issue, track which platform
+	// labels it was found in (using the parallel labels slice).
 	seen := make(map[string]*SummaryIssue)
-	for _, art := range parsed.Artifacts {
+	for artIdx, art := range parsed.Artifacts {
+		label := ""
+		if artIdx < len(labels) {
+			label = labels[artIdx]
+		}
 		for _, issue := range art.Issues {
 			if issue.IssueID == "" {
 				continue
 			}
-			if _, exists := seen[issue.IssueID]; exists {
+			if existing, ok := seen[issue.IssueID]; ok {
+				// Add platform label if not already recorded.
+				if label != "" {
+					found := false
+					for _, p := range existing.Platforms {
+						if p == label {
+							found = true
+							break
+						}
+					}
+					if !found {
+						existing.Platforms = append(existing.Platforms, label)
+					}
+				}
+				// Merge fixable and JFrog severity from any artifact.
+				if !existing.Fixable {
+					for _, comp := range issue.Components {
+						if len(comp.FixedVersions) > 0 {
+							existing.Fixable = true
+							break
+						}
+					}
+				}
+				if existing.JFrogSeverity == "" && issue.ExtendedInformation != nil {
+					existing.JFrogSeverity = issue.ExtendedInformation.JFrogResearchSeverity
+				}
 				continue
 			}
 			si := &SummaryIssue{
@@ -199,6 +234,9 @@ func (xs *XrayService) GetSummaryV2(paths []string) (SeverityCounts, []SummaryIs
 					break
 				}
 			}
+			if label != "" {
+				si.Platforms = []string{label}
+			}
 			seen[issue.IssueID] = si
 		}
 	}
@@ -206,6 +244,7 @@ func (xs *XrayService) GetSummaryV2(paths []string) (SeverityCounts, []SummaryIs
 	var counts SeverityCounts
 	issues := make([]SummaryIssue, 0, len(seen))
 	for _, si := range seen {
+		sort.Strings(si.Platforms)
 		issues = append(issues, *si)
 		switch si.Severity {
 		case "Critical":

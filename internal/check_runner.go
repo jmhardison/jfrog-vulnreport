@@ -138,6 +138,7 @@ func RunCheckCommandFromConf(conf *CheckConfiguration, repoKey, imageName, tag, 
 // the report contains malicious packages or any vulnerabilities.
 func generateSecurityBanner(report *VulnerabilityReport, maliciousLookup map[string]bool, minSeverity string) {
 	hasMalicious := len(maliciousLookup) > 0 || len(report.MaliciousIssues) > 0
+	hasCritical := report.CriticalCount > 0
 	hasFindings := report.TotalIssues > 0
 
 	if hasMalicious {
@@ -154,8 +155,21 @@ func generateSecurityBanner(report *VulnerabilityReport, maliciousLookup map[str
 		fmt.Println()
 		fmt.Println("---")
 		fmt.Println()
+	} else if hasCritical {
+		// ORANGE banner for critical CVEs (no malicious)
+		fmt.Println("![Critical CVEs](https://img.shields.io/badge/SECURITY-CRITICAL_CVE'S_PRESENT-orange?style=for-the-badge&logo=alert&logoColor=white)")
+		fmt.Println("---")
+		fmt.Println()
+		fmt.Println("> [!CAUTION]")
+		fmt.Println("> ## :red_circle: CRITICAL CVE'S PRESENT")
+		fmt.Println("> Critical severity vulnerabilities found - review and remediation required.")
+		fmt.Println("> Fixable critical issues should be resolved before promotion.")
+		fmt.Println()
+		fmt.Println()
+		fmt.Println("---")
+		fmt.Println()
 	} else if hasFindings {
-		// YELLOW banner for CVEs present
+		// YELLOW banner for non-critical CVEs present
 		fmt.Println("![CVEs Present](https://img.shields.io/badge/SECURITY-CVE'S_PRESENT-yellow?style=for-the-badge&logo=alert&logoColor=black)")
 		fmt.Println("---")
 		fmt.Println()
@@ -325,18 +339,23 @@ func outputMarkdownReport(report *VulnerabilityReport, maliciousLookup map[strin
 			fmt.Println("---")
 			fmt.Println()
 			fmt.Printf("<details>\n<summary>Security Findings (%d | %d fixable) — click to expand</summary>\n\n", len(filtered), fixableCount)
-			fmt.Println("| XRAY-ID | SEVERITY | JFROG SEVERITY | FIXABLE |")
-			fmt.Println("|---------|----------|----------------|---------|")
+			fmt.Println("| XRAY-ID | SEVERITY | JFROG SEVERITY | FIXABLE | PLATFORMS |")
+			fmt.Println("|---------|----------|----------------|---------|-----------|")
 			for _, si := range filtered {
 				fixable := "No"
 				if si.Fixable {
 					fixable = "Yes"
 				}
-				fmt.Printf("| %s | %s | %s | %s |\n",
+				platformsStr := strings.Join(si.Platforms, "<br>")
+				if platformsStr == "" {
+					platformsStr = "-"
+				}
+				fmt.Printf("| %s | %s | %s | %s | %s |\n",
 					si.IssueID,
 					severityLabel(si.Severity),
 					jfrogSeverityLabel(si.JFrogSeverity, si.Severity),
 					fixable,
+					platformsStr,
 				)
 			}
 			fmt.Println()
@@ -561,12 +580,7 @@ func generateVulnerabilityReport(conf *CheckConfiguration, repoKey, imageName, t
 		}
 	}
 
-	// Initialize lastDp from the last discovered path to carry platform metadata into the report.
-	var lastDp dockerPath
-	if len(platformPaths) > 0 {
-		lastDp = platformPaths[len(platformPaths)-1]
-	}
-	if lastDp.isList {
+	if len(platformPaths) > 0 && platformPaths[0].isList {
 		report.IsMultiPlatform = true
 	}
 
@@ -591,21 +605,49 @@ func generateVulnerabilityReport(conf *CheckConfiguration, repoKey, imageName, t
 		log.Debug(fmt.Sprintf("Malicious watch query for path %s returned %d violation(s)", dp.path, len(maliciousResults)))
 	}
 
-	// Query Xray v2 summary API for severity counts. Reads cached scan data only — does not
-	// trigger an on-demand scan. Path format: {projectKey}/{repo}/{image}/{tag}/manifest.json
-	// For multi-platform images, the v2 API requires the top-level list.manifest.json path
-	// (not per-platform sha256__ sub-paths, which are Artifactory storage paths, not index paths).
+	// Query Xray v2 summary API for severity counts and per-issue detail.
+	// Build one path+label per discovered platform for per-platform attribution in the findings table.
 	isMultiPlatform := len(platformPaths) > 0 && strings.Contains(platformPaths[0].path, "sha256__")
-	var v2TopPath string
-	if isMultiPlatform {
-		v2TopPath = conf.ProjectKey + "/" + repoKey + "/" + imageName + "/" + tag + "/list.manifest.json"
-	} else {
-		v2TopPath = conf.ProjectKey + "/" + platformPaths[0].path
+
+	v2Paths := make([]string, 0, len(platformPaths))
+	v2Labels := make([]string, 0, len(platformPaths))
+	for _, dp := range platformPaths {
+		label := dp.os + "/" + dp.arch
+		if dp.os == "" && dp.arch == "" {
+			label = ""
+		} else if dp.arch == "" {
+			label = dp.os
+		}
+		v2Paths = append(v2Paths, conf.ProjectKey+"/"+dp.path)
+		v2Labels = append(v2Labels, label)
 	}
-	counts, issues, err := xraySvc.GetSummaryV2([]string{v2TopPath})
+
+	counts, issues, err := xraySvc.GetSummaryV2(v2Paths, v2Labels)
 	if err != nil {
 		log.Warn(fmt.Sprintf("v2 summary API failed, counts will be 0: %v", err))
-	} else {
+	} else if counts.Total == 0 && isMultiPlatform {
+		// Per-platform sha256__ paths may not be indexed separately by Xray for multi-platform images.
+		// Fall back to the top-level list.manifest.json path for combined counts.
+		// Platform attribution is then set to all detected platforms for every finding.
+		log.Info("Per-platform v2 query returned 0 results; falling back to list.manifest.json")
+		listPath := conf.ProjectKey + "/" + repoKey + "/" + imageName + "/" + tag + "/list.manifest.json"
+		counts, issues, err = xraySvc.GetSummaryV2([]string{listPath}, nil)
+		if err != nil {
+			log.Warn(fmt.Sprintf("v2 list.manifest.json fallback failed, counts will be 0: %v", err))
+		} else {
+			allLabels := make([]string, 0, len(v2Labels))
+			for _, l := range v2Labels {
+				if l != "" {
+					allLabels = append(allLabels, l)
+				}
+			}
+			for i := range issues {
+				issues[i].Platforms = allLabels
+			}
+		}
+	}
+
+	if err == nil {
 		report.TotalIssues = counts.Total
 		report.CriticalCount = counts.Critical
 		report.HighCount = counts.High
@@ -614,18 +656,19 @@ func generateVulnerabilityReport(conf *CheckConfiguration, repoKey, imageName, t
 		report.SummaryIssues = issues
 	}
 
-	var manifestDigest string
-	if len(lastDp.digests) > 0 {
-		manifestDigest = lastDp.digests[0]
+	for _, dp := range platformPaths {
+		var manifestDigest string
+		if len(dp.digests) > 0 {
+			manifestDigest = dp.digests[0]
+		}
+		report.Platforms = append(report.Platforms, PlatformVulnerabilityInfo{
+			ManifestDigest: manifestDigest,
+			Platform: Platform{
+				OS:           dp.os,
+				Architecture: dp.arch,
+			},
+		})
 	}
-	platformInfo := PlatformVulnerabilityInfo{
-		ManifestDigest: manifestDigest,
-		Platform: Platform{
-			OS:           lastDp.os,
-			Architecture: lastDp.arch,
-		},
-	}
-	report.Platforms = append(report.Platforms, platformInfo)
 
 	for issueID := range maliciousLookup {
 		report.MaliciousIssues = append(report.MaliciousIssues, issueID)
