@@ -315,10 +315,16 @@ func outputMarkdownReport(report *VulnerabilityReport, maliciousLookup map[strin
 			return filtered[i].IssueID < filtered[j].IssueID
 		})
 		if len(filtered) > 0 {
+			fixableCount := 0
+			for _, si := range filtered {
+				if si.Fixable {
+					fixableCount++
+				}
+			}
 			fmt.Println()
 			fmt.Println("---")
 			fmt.Println()
-			fmt.Printf("<details>\n<summary>Security Findings (%d) — click to expand</summary>\n\n", len(filtered))
+			fmt.Printf("<details>\n<summary>Security Findings (%d | %d fixable) — click to expand</summary>\n\n", len(filtered), fixableCount)
 			fmt.Println("| XRAY-ID | SEVERITY | JFROG SEVERITY | FIXABLE |")
 			fmt.Println("|---------|----------|----------------|---------|")
 			for _, si := range filtered {
