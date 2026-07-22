@@ -43,7 +43,7 @@ go build -o jfrog-vulnreport . && jf plugin install jfrog-vulnreport  # Install 
 - `models.go` — Go types matching Xray/Artifactory JSON payloads (`DockerManifest`, `ManifestList`, `VulnerabilityReport`, `EnhancedVulnerabilityReport`, `CompactFinding`).
 - `helpers.go` — pure utilities: `GetDigestPaths`, `extractRepoFromPath`, `IsValidManifestContent`.
 - `docker_paths.go` — Docker image path discovery. `discoverImageArtifacts` uses AQL search via `ArtifactoryService`; `expandListManifest` builds per-platform paths as `<repo>/<image>/<tag>/sha256__<digest>/manifest.json`; `FilterManifestsByPlatform` filters by os/arch.
-- `xray_sdk.go` — SDK service wrappers. `XrayService` wraps `*jfroghttpclient.JfrogHttpClient` for Xray API calls: `GetViolations` (paginated `POST /api/v1/violations` for malicious lookup) and `GetSummaryV2` (`POST /api/v2/summary/artifact` for severity counts and per-issue detail). `ArtifactoryService` wraps the same client type for Artifactory AQL search (`SearchArtifacts`) and raw artifact fetch (`FetchArtifactBody`). Both mirror the `XscInnerService` pattern from `jfrog-client-go`. Also defines `xrayViolation`, `xrayViolationInfo`, `violationWithMalicious`, `extractCwesFromProperties`, `SeverityCounts`, and `SummaryIssue` (IssueID, Severity, JFrogSeverity, Fixable).
+- `xray_sdk.go` — SDK service wrappers. `XrayService` wraps `*jfroghttpclient.JfrogHttpClient` for Xray API calls: `GetViolations` (paginated `POST /api/v1/violations` for malicious lookup) and `GetSummaryV2` (`POST /api/v2/summary/artifact` for severity counts and per-issue detail). `ArtifactoryService` wraps the same client type for Artifactory AQL search (`SearchArtifacts`) and raw artifact fetch (`FetchArtifactBody`). Both mirror the `XscInnerService` pattern from `jfrog-client-go`. Also defines `xrayViolation`, `xrayViolationInfo`, `violationWithMalicious`, `extractCwesFromProperties`, `SeverityCounts`, and `SummaryIssue` (IssueID, Severity, JFrogSeverity, Fixable, Platforms).
 
 **Build / install**: go build + jfrog CLI installation flow; plugin registered with framework via `github.com/jfrog/jfrog-cli-core/v2/plugins`. Plugin name: `jfrog-vulnreport` (lowercase + numbers/dashes, max 30 chars).
 
@@ -110,9 +110,10 @@ cd /jfrog-vulnreport && go build -o jfrog-vulnreport . && jf plugin create --fil
 
 4. Query Xray v2 summary API for severity counts and per-issue detail:
    POST <xrayUrl>/api/v2/summary/artifact
-   Body: {"paths": ["<projectKey>/<repo>/<image>/<tag>/manifest.json"]}
-   → For multi-platform images use list.manifest.json path, not per-platform sha256__ sub-paths
-   → Returns deduplicated findings with severity, JFrog Research severity, and fixable status
+   Body: {"paths": ["<projectKey>/<repo>/<image>/<tag>/sha256__<digest>/manifest.json", ...], "labels": ["linux/amd64", ...]}
+   → For multi-platform images, first tries per-platform sha256__ paths with platform labels
+   → If total=0 (Xray may not index sub-paths separately), falls back to list.manifest.json with all platform labels applied to every finding
+   → Returns deduplicated findings with severity, JFrog Research severity, fixable status, and per-finding platform attribution
    → Populates SeverityCounts and []SummaryIssue — used for Security Summary and Findings table
 ```
 
@@ -169,7 +170,7 @@ The malicious lookup map (`map[string]bool` keyed by issue ID) is built in `gene
 
 **Key types:**
 - `violationWithMalicious` (in `xray_sdk.go`) — wraps `services.Vulnerability` with `MaliciousPackage bool`
-- `SummaryIssue` (in `xray_sdk.go`) — per-finding detail from v2 summary API: `IssueID`, `Severity`, `JFrogSeverity`, `Fixable`
+- `SummaryIssue` (in `xray_sdk.go`) — per-finding detail from v2 summary API: `IssueID`, `Severity`, `JFrogSeverity`, `Fixable`, `Platforms []string` (sorted platform labels where the finding was detected, e.g. `["linux/amd64", "linux/arm64"]`)
 - The malicious lookup map is built in `generateVulnerabilityReport()` and passed to all output functions
 
 ### Project Key Flag
@@ -208,3 +209,6 @@ The `--project-key` flag is passed in the Violations API query URL (`?projectKey
 11. **v2 summary API requires project-key prefix in path** — `GetSummaryV2` paths must be formatted as `<projectKey>/<repo>/<image>/<tag>/manifest.json`. Omitting the project key prefix causes the API to return no results silently.
 12. **v2 summary API uses list.manifest.json for multi-platform images** — pass the top-level `list.manifest.json` path, not the per-platform `sha256__<digest>/manifest.json` sub-paths. The sub-paths are Artifactory storage paths; the v2 API expects the manifest index path.
 13. **Security Findings summary line includes fixable count** — the collapsible `<details>` summary reads `Security Findings (N | M fixable)`. The fixable count comes from `SummaryIssue.Fixable` (true when any affected component has a known fix version in the v2 summary response). Both counts respect the active `--min-severity` filter.
+14. **Four-tier GitHub MD banner** — `generateSecurityBanner` renders [!CAUTION] red for malicious content (highest priority), [!CAUTION] orange for critical CVEs with no malicious, [!WARNING] yellow for non-critical CVEs, and [!NOTE] green for clean. Banner tier is determined from pre-counted report fields (`MaliciousIssues`, `CriticalCount`, `TotalIssues`) — not from `--min-severity`.
+15. **`SummaryIssue.Platforms` carries per-finding attribution** — `GetSummaryV2` accepts a `labels []string` parallel to `paths []string`. For multi-platform images, each finding accumulates the labels from every artifact where it appeared. If `labels` is nil (fallback call with list.manifest.json), all platform labels from the original per-platform query are applied to every finding.
+16. **Multi-platform v2 fallback** — if a per-platform sha256__ v2 query returns total=0 (Xray may not index sub-paths separately), `generateVulnerabilityReport` retries with the top-level `list.manifest.json` path and `labels=nil`, then bulk-assigns all platform labels to every returned finding.

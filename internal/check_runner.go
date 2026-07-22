@@ -134,9 +134,12 @@ func RunCheckCommandFromConf(conf *CheckConfiguration, repoKey, imageName, tag, 
 	return nil
 }
 
-// generateSecurityBanner renders a GitHub-flavored alert banner (CAUTION/WARNING/NOTE) based on whether
-// the report contains malicious packages or any vulnerabilities.
-func generateSecurityBanner(report *VulnerabilityReport, maliciousLookup map[string]bool, minSeverity string) {
+// generateSecurityBanner renders a GitHub-flavored alert banner based on the highest-severity finding tier:
+//   - Malicious detected → [!CAUTION] red banner (always takes priority)
+//   - Critical CVEs, no malicious → [!CAUTION] orange banner
+//   - Non-critical CVEs, no malicious → [!WARNING] yellow banner
+//   - No findings → [!NOTE] green banner
+func generateSecurityBanner(report *VulnerabilityReport, maliciousLookup map[string]bool) {
 	hasMalicious := len(maliciousLookup) > 0 || len(report.MaliciousIssues) > 0
 	hasCritical := report.CriticalCount > 0
 	hasFindings := report.TotalIssues > 0
@@ -266,7 +269,7 @@ func convertToEnhancedReport(report *VulnerabilityReport, maliciousLookup map[st
 // parameter is used to render a clickable link to the image's manifest in JFrog Platform UI —
 // constructed as <baseUrl>/ui/repos/tree/General/<repo>/<path>/list.manifest.json without additional HTTP requests.
 func outputMarkdownReport(report *VulnerabilityReport, maliciousLookup map[string]bool, manifestUrl string, minSeverity string) error {
-	generateSecurityBanner(report, maliciousLookup, minSeverity)
+	generateSecurityBanner(report, maliciousLookup)
 
 	fmt.Printf("# Xray Security Report\n\n")
 	fmt.Printf("## %s\n\n", report.ImageName)
@@ -439,8 +442,6 @@ func severityMeetsMin(severity, minSeverity string) bool {
 	return r <= minRank
 }
 
-// Missing functions - minimal implementations
-
 // ParseImageName splits a full image reference (e.g., "docker-local/myimage:latest") into its
 // repository key, image name, and tag components. Used as the first step in artifact discovery.
 func ParseImageName(imageName string) (string, string, string, error) {
@@ -516,12 +517,15 @@ func newArtifactoryService(serverDetails *configCore.ServerDetails) (*Artifactor
 }
 
 // generateVulnerabilityReport orchestrates the full vulnerability query pipeline:
-//  1. Discovers artifact paths via Artifactory search (handles both single and multi-platform images)
-//  2. Queries the malicious watch to build a lookup map of known malicious issue IDs
-//  3. Calls the Xray summary API to get total/severity counts (not watch-scoped)
+//  1. Discovers artifact paths via Artifactory AQL (handles both single and multi-platform images)
+//  2. Optionally filters by --platform / --os
+//  3. Queries the malicious watch (GetViolations) per platform to build maliciousLookup
+//  4. Queries the v2 summary API (GetSummaryV2) for severity counts and per-issue detail,
+//     including fixable status and per-platform attribution; falls back to list.manifest.json
+//     for multi-platform images if per-platform sha256__ paths return no results
 //
-// The maliciousLookup map maps issue ID → true for every issue ID returned by the malicious watch.
-// Summary counts are used for the Security Summary section in both JSON and markdown output.
+// Returns the populated VulnerabilityReport and the maliciousLookup map (issue ID → true).
+// SummaryIssues carries per-finding detail used by both JSON and markdown formatters.
 func generateVulnerabilityReport(conf *CheckConfiguration, repoKey, imageName, tag string, xraySvc *XrayService, artSvc *ArtifactoryService) (*VulnerabilityReport, map[string]bool, error) {
 	if !conf.Silent {
 		log.Info(fmt.Sprintf("Generating vulnerability report for %s/%s:%s", repoKey, imageName, tag))
@@ -584,9 +588,9 @@ func generateVulnerabilityReport(conf *CheckConfiguration, repoKey, imageName, t
 		report.IsMultiPlatform = true
 	}
 
-	// Step 2a: Query the malicious-only watch to resolve issue IDs that count as malicious.
-	// The Violations API's own malicious_package field is unreliable, so we always use a dedicated
-	// --malicious-watch-name as the source of truth. Uses SDK-based XrayService (Phase 4).
+	// Step 3: Query the malicious-only watch to resolve which issue IDs are malicious.
+	// The Violations API's own malicious_package field is unreliable, so we use a dedicated
+	// --malicious-watch-name watch as the source of truth.
 	maliciousLookup := make(map[string]bool)
 
 	log.Info(fmt.Sprintf("Resolving malicious issue IDs from watch: %s", conf.MaliciousWatchName))

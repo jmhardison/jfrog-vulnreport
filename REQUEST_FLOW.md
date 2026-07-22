@@ -140,22 +140,45 @@ This query runs unconditionally regardless of whether `--watch-name` was provide
 
 **File:** `internal/xray_sdk.go` — `GetSummaryV2()`
 
-To populate the "Security Summary" section (total, critical, high, medium, low counts) and the collapsible Security Findings table, the plugin calls the Xray v2 summary API:
+To populate the "Security Summary" section (total, critical, high, medium, low counts) and the collapsible Security Findings table, the plugin calls the Xray v2 summary API.
 
+**Multi-platform images — per-platform query with fallback:**
+
+For multi-platform images, the plugin first attempts per-platform sha256__ paths with platform labels:
+
+```
+POST <xray-url>/api/v2/summary/artifact
+{
+  "paths":  ["<projectKey>/<repo>/<image>/<tag>/sha256__<digest-amd64>/manifest.json",
+             "<projectKey>/<repo>/<image>/<tag>/sha256__<digest-arm64>/manifest.json"],
+  "labels": ["linux/amd64", "linux/arm64"]
+}
+```
+
+If the response returns `total=0` (Xray may not index per-platform sub-paths separately for multi-platform images), the plugin falls back to the top-level `list.manifest.json` path:
+
+```
+POST <xray-url>/api/v2/summary/artifact
+{ "paths": ["<projectKey>/<repo>/<image>/<tag>/list.manifest.json"] }
+```
+
+In the fallback case, all detected platform labels are applied to every finding in the response (since the list path represents all platforms).
+
+**Single-platform images:**
+
+For single-platform images, the manifest.json path is queried directly:
 ```
 POST <xray-url>/api/v2/summary/artifact
 { "paths": ["<projectKey>/<repo>/<image>/<tag>/manifest.json"] }
 ```
 
-For multi-platform images, the path uses `list.manifest.json` (the top-level manifest index path), not the per-platform `sha256__<digest>/manifest.json` sub-paths — those are Artifactory storage paths, not the index paths the v2 API expects.
-
 This call is **not watch-scoped** — it returns everything Xray has indexed for the artifact across all policies. This gives a complete picture of the image's vulnerability posture.
 
 The response is deduplicated by `issue_id` (the same CVE appearing in multiple platforms counts as one finding) and parsed into two structures:
 - `SeverityCounts` — aggregate total, critical, high, medium, low counts
-- `[]SummaryIssue` — per-finding detail: `IssueID`, `Severity`, `JFrogSeverity` (JFrog Research severity, may differ from standard), `Fixable` (true if any affected component has a known fix version)
+- `[]SummaryIssue` — per-finding detail: `IssueID`, `Severity`, `JFrogSeverity` (JFrog Research severity, may differ from standard), `Fixable` (true if any affected component has a known fix version), `Platforms` (sorted slice of platform labels where the finding was detected)
 
-If the v2 API call fails, a warning is logged and all counts default to zero. No fallback query is attempted.
+If the v2 API call fails, a warning is logged and all counts default to zero. No further fallback is attempted.
 
 > **Note:** The v1 summary API (`POST /api/v1/summary/artifact`) hangs indefinitely for Docker images. Always use the v2 endpoint (`/api/v2/summary/artifact`).
 
@@ -182,13 +205,14 @@ The result is a single `EnhancedVulnerabilityReport` struct printed as indented 
 `outputMarkdownReport()` produces GitHub-flavored markdown in this order:
 
 1. **Security banner** — a GitHub alert block (rendered before the header for immediate visibility):
-   - `[!CAUTION]` (red) if any malicious content found
-   - `[!WARNING]` (yellow) if CVEs found but no malicious content
+   - `[!CAUTION]` (red) if any malicious content found — highest priority
+   - `[!CAUTION]` (orange) if critical CVEs found but no malicious content
+   - `[!WARNING]` (yellow) if non-critical CVEs found but no malicious or critical content
    - `[!NOTE]` (green) if clean
 2. **Header** — image name and a link to the manifest in JFrog Platform UI
 3. **Security Summary** — total, critical/high/medium/low counts, malicious count, list of platforms scanned. Counts come from the v2 summary API (Phase 4).
 4. **Malicious Findings table** — only appears if malicious issues exist. Lists each issue ID from the malicious watch.
-5. **Security Findings table** — a collapsible `<details>` block. Summary line shows total count and fixable count: `Security Findings (293 | 47 fixable) — click to expand`. Filtered by `--min-severity` if specified. Sorted Critical→Low, then XRAY-ID. Columns: XRAY-ID, SEVERITY, JFROG SEVERITY, FIXABLE. Fixable status and JFrog Research severity come from the `SummaryIssue` slice returned by Phase 4.
+5. **Security Findings table** — a collapsible `<details>` block. Summary line shows total count and fixable count: `Security Findings (293 | 47 fixable) — click to expand`. Filtered by `--min-severity` if specified. Sorted Critical→Low, then XRAY-ID. Columns: XRAY-ID, SEVERITY, JFROG SEVERITY, FIXABLE, PLATFORMS. The PLATFORMS column lists which platform(s) each finding was detected on (e.g. `linux/amd64<br>linux/arm64`). Fixable status, JFrog Research severity, and platform attribution come from the `SummaryIssue` slice returned by Phase 4.
 
 In GitHub Markdown mode, all log output is suppressed (log level set to ERROR) so only the markdown goes to stdout — this makes it safe to pipe directly into a CI pipeline step.
 
