@@ -30,20 +30,20 @@ go build -o jfrog-vulnreport . && jf plugin install jfrog-vulnreport  # Install 
 
 - **Single command**: `check` — no subcommands planned
 - **Output formats**: `json` (default, enhanced report with image metadata/counts), `github-md` (GitHub-flavored markdown with alert banners for CI pipelines)
-- Image tag input → AQL search → manifest discovery → Violations API query per platform
+- Image tag input → AQL search → manifest discovery → Violations API (malicious watch) → v2 summary API (counts + fixable) → formatted report
 
 ### Code Organization & File Responsibilities
 
 **Entry point**: `main.go` — registers plugin with `github.com/jfrog/jfrog-cli-core/v2/plugins`, declares build time (`internal.BuildTime`) and version (`internal.Version`).
 
-**CLI command**: `commands/check.go` — `CheckCommand` struct with fluent setters for all flags. `GetCheckCommand()` registers the CLI command; `checkCmd()` reads framework flags into `CheckCommand` fields and calls `Exec()`. `NewCheckCommand()` initializes `ShowFindings: true` to match the CLI-declared default. Any new flag must be registered in both `getCheckFlags()` and `Exec()`.
+**CLI command**: `commands/check.go` — `CheckCommand` struct with fluent setters for all flags. `GetCheckCommand()` registers the CLI command; `checkCmd()` reads framework flags into `CheckCommand` fields and calls `Exec()`. Any new flag must be registered in both `getCheckFlags()` and `Exec()`.
 
 **Internal logic**: `/internal/` package contains business logic split across five files:
 - `check_runner.go` — main command implementation; `RunCheckCommand` orchestrates auth, service creation, and report generation. `generateVulnerabilityReport` handles dual-path discovery, Violations API queries for all platforms (no early break), malicious lookup map construction, and severity aggregation. Output formatters: `outputJSONReport`, `outputMarkdownReport` (emits GitHub alert banners via `generateSecurityBanner`).
 - `models.go` — Go types matching Xray/Artifactory JSON payloads (`DockerManifest`, `ManifestList`, `VulnerabilityReport`, `EnhancedVulnerabilityReport`, `CompactFinding`).
 - `helpers.go` — pure utilities: `GetDigestPaths`, `extractRepoFromPath`, `IsValidManifestContent`.
 - `docker_paths.go` — Docker image path discovery. `discoverImageArtifacts` uses AQL search via `ArtifactoryService`; `expandListManifest` builds per-platform paths as `<repo>/<image>/<tag>/sha256__<digest>/manifest.json`; `FilterManifestsByPlatform` filters by os/arch.
-- `xray_sdk.go` — SDK service wrappers. `XrayService` wraps `*jfroghttpclient.JfrogHttpClient` for Xray Violations API calls (`GetViolations`). `ArtifactoryService` wraps the same client type for Artifactory AQL search (`SearchArtifacts`) and raw artifact fetch (`FetchArtifactBody`). Both mirror the `XscInnerService` pattern from `jfrog-client-go`. Also defines `xrayViolation`, `xrayViolationInfo`, `violationWithMalicious`, and `extractCwesFromProperties`.
+- `xray_sdk.go` — SDK service wrappers. `XrayService` wraps `*jfroghttpclient.JfrogHttpClient` for Xray API calls: `GetViolations` (paginated `POST /api/v1/violations` for malicious lookup) and `GetSummaryV2` (`POST /api/v2/summary/artifact` for severity counts and per-issue detail). `ArtifactoryService` wraps the same client type for Artifactory AQL search (`SearchArtifacts`) and raw artifact fetch (`FetchArtifactBody`). Both mirror the `XscInnerService` pattern from `jfrog-client-go`. Also defines `xrayViolation`, `xrayViolationInfo`, `violationWithMalicious`, `extractCwesFromProperties`, `SeverityCounts`, and `SummaryIssue` (IssueID, Severity, JFrogSeverity, Fixable).
 
 **Build / install**: go build + jfrog CLI installation flow; plugin registered with framework via `github.com/jfrog/jfrog-cli-core/v2/plugins`. Plugin name: `jfrog-vulnreport` (lowercase + numbers/dashes, max 30 chars).
 
@@ -84,7 +84,8 @@ cd /jfrog-vulnreport && go build -o jfrog-vulnreport . && jf plugin create --fil
 | Layer | System | Purpose | How we call it |
 |-------|--------|---------|----------------|
 | 1 | **Artifactory** | Stores Docker manifests/blobs | `ArtifactoryService.SearchArtifacts` (AQL via `POST /api/search/aql`) |
-| 2 | **Xray Violations** | Returns violation details with CVEs, severity, AND malicious_package status | `XrayService.GetViolations` (direct SDK `SendPost` to `/api/v1/violations`) |
+| 2a | **Xray Violations** | Identifies malicious issue IDs from the malicious watch | `XrayService.GetViolations` (paginated `POST /api/v1/violations`) |
+| 2b | **Xray v2 Summary** | Returns severity counts and per-issue detail (severity, JFrog severity, fixable status) | `XrayService.GetSummaryV2` (`POST /api/v2/summary/artifact`) |
 
 ### Workflow
 
@@ -98,16 +99,24 @@ cd /jfrog-vulnreport && go build -o jfrog-vulnreport . && jf plugin create --fil
    - list.manifest.json → multi-platform image (Path A)
    - manifest.json      → single-platform image (Path B)
 
-3. Query Xray Violations API for each artifact path (all platforms — no early break):
+3. Query Xray Violations API for each platform path (--malicious-watch-name only, all platforms — no early break):
    POST <xrayUrl>/api/v1/violations
-   Body: {"filters": {"watch_name": "...", "resources": {"artifacts": [{"repo": "...", "path": "..."}]}, "include_details": true}}
+   Body: {"filters": {"watch_name": "<malicious-watch-name>", "violation_type": "Security",
+          "resources": {"artifacts": [{"repo": "...", "path": "..."}]}, "include_details": true},
+          "pagination": {"order_by": "severity", "limit": 100, "offset": 1}}
+   → Paginated; fetch all pages until total_violations is reached
    → Violations API expects path WITHOUT repo prefix (GetViolations strips it automatically)
-   → Returns violations[] each with malicious_package bool
+   → Every issue_id returned is stored in maliciousLookup map (source of truth for malicious status)
 
-4. Malicious lookup map built from Violations response — no separate Events API calls needed.
+4. Query Xray v2 summary API for severity counts and per-issue detail:
+   POST <xrayUrl>/api/v2/summary/artifact
+   Body: {"paths": ["<projectKey>/<repo>/<image>/<tag>/manifest.json"]}
+   → For multi-platform images use list.manifest.json path, not per-platform sha256__ sub-paths
+   → Returns deduplicated findings with severity, JFrog Research severity, and fixable status
+   → Populates SeverityCounts and []SummaryIssue — used for Security Summary and Findings table
 ```
 
-**Critical**: The Xray SummaryService (`/api/v1/summary/artifact`) **hangs indefinitely** for Docker images. Always use the Violations API instead.
+**Critical**: The v1 summary API (`/api/v1/summary/artifact`) **hangs indefinitely** for Docker images. Always use `/api/v2/summary/artifact` for summary data.
 
 ### Dual-Path Discovery (Single vs Multi-Platform Images)
 
@@ -153,15 +162,15 @@ All Xray and Artifactory API calls use direct SDK HTTP client calls via `*jfrogh
 
 ### Malicious Package Detection
 
-Two Xray watches are used:
-1. `--watch-name` (report watch): returns all security violations for the image
-2. `--malicious-watch-name` (malicious watch): returns only malicious package violations — used as the authoritative source for which issue IDs are malicious
+One dedicated Xray watch is used for malicious detection:
+- `--malicious-watch-name` (required): a narrow watch configured to contain only malicious package violations — used as the authoritative source for which issue IDs are malicious. The Violations API's own `malicious_package` field is unreliable and is not used.
 
-The malicious lookup map (`map[string]bool` keyed by issue ID) is built in `generateVulnerabilityReport` from the malicious watch query, then passed to all output functions. Issue IDs in the malicious watch but not in the report watch are tracked as `OrphanedMalicious` and rendered separately in the report.
+The malicious lookup map (`map[string]bool` keyed by issue ID) is built in `generateVulnerabilityReport` from the malicious watch query, then passed to all output functions. Any issue ID returned by this watch is considered malicious.
 
 **Key types:**
 - `violationWithMalicious` (in `xray_sdk.go`) — wraps `services.Vulnerability` with `MaliciousPackage bool`
-- The lookup map is built in `generateVulnerabilityReport()` and passed to all output functions
+- `SummaryIssue` (in `xray_sdk.go`) — per-finding detail from v2 summary API: `IssueID`, `Severity`, `JFrogSeverity`, `Fixable`
+- The malicious lookup map is built in `generateVulnerabilityReport()` and passed to all output functions
 
 ### Project Key Flag
 
@@ -186,7 +195,7 @@ The `--project-key` flag is passed in the Violations API query URL (`?projectKey
 
 ## Gotchas / Lessons Learned
 
-1. **Xray SummaryService hangs** — `/api/v1/summary/artifact` hangs indefinitely for Docker images. Always use `/api/v1/violations` instead.
+1. **Xray v1 SummaryService hangs** — `/api/v1/summary/artifact` hangs indefinitely for Docker images. Use `/api/v2/summary/artifact` for summary/count data and `/api/v1/violations` for malicious watch queries.
 2. **Auth must be initialized before SDK use** — `common.GetServerDetails(c)` (not a bare `getServerDetails(serverId)`) triggers `CreateInitialRefreshableTokensIfNeeded`. Platform access token then works for both Xray and Artifactory without a separate token exchange.
 3. **Violations API path is without repo prefix** — `GetViolations` strips the repo prefix automatically (`"docker-local/img/tag/manifest.json"` → `"img/tag/manifest.json"`). Callers can pass either form.
 4. **Multi-platform paths use Artifactory storage format** — `sha256__<digest>/manifest.json`, NOT Docker registry API format `manifests/<digest>`. Using the wrong format causes Xray to return 0 violations silently.
@@ -196,3 +205,6 @@ The `--project-key` flag is passed in the Violations API query URL (`?projectKey
 8. **Malicious watch errors must be visible** — log malicious watch query failures at `Warn`, not `Debug`. In github-md mode, log level is set to `ERROR`; `Debug` messages are completely invisible, leaving the malicious lookup silently empty.
 9. **`--platform linux` (no slash) sets OS, not arch** — the `--platform` flag without a slash sets `conf.OS = conf.Platform` and leaves `arch` empty. A single word is interpreted as OS only (e.g., `linux`), not architecture.
 10. **CVE properties can be string or array** — Xray may return `"cve"` as a JSON string or `[]string`. Use a type switch (see `xray_sdk.go`) to handle both; a bare `.(string)` assertion silently drops array-form CVEs.
+11. **v2 summary API requires project-key prefix in path** — `GetSummaryV2` paths must be formatted as `<projectKey>/<repo>/<image>/<tag>/manifest.json`. Omitting the project key prefix causes the API to return no results silently.
+12. **v2 summary API uses list.manifest.json for multi-platform images** — pass the top-level `list.manifest.json` path, not the per-platform `sha256__<digest>/manifest.json` sub-paths. The sub-paths are Artifactory storage paths; the v2 API expects the manifest index path.
+13. **Security Findings summary line includes fixable count** — the collapsible `<details>` summary reads `Security Findings (N | M fixable)`. The fixable count comes from `SummaryIssue.Fixable` (true when any affected component has a known fix version in the v2 summary response). Both counts respect the active `--min-severity` filter.

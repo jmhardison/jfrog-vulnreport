@@ -136,20 +136,28 @@ This query runs unconditionally regardless of whether `--watch-name` was provide
 
 ---
 
-### Phase 4 — Severity Summary Counts
+### Phase 4 — Severity Summary Counts and Per-Issue Detail
 
-**File:** `internal/xray_sdk.go` — `GetSummaryByChecksums()`
+**File:** `internal/xray_sdk.go` — `GetSummaryV2()`
 
-To populate the "Security Summary" section (total, critical, high, medium, low counts), the plugin calls the Xray summary API:
+To populate the "Security Summary" section (total, critical, high, medium, low counts) and the collapsible Security Findings table, the plugin calls the Xray v2 summary API:
 
 ```
-POST <xray-url>/api/v1/summary/artifact
-{ "checksums": ["<sha256-hex>", "<sha256-hex>", ...] }
+POST <xray-url>/api/v2/summary/artifact
+{ "paths": ["<projectKey>/<repo>/<image>/<tag>/manifest.json"] }
 ```
 
-This call is **not watch-scoped** — it returns everything Xray knows about the artifact across all watches and policies. This is intentional: the summary gives a complete picture of the image's vulnerability posture, not just what one watch's policy catches.
+For multi-platform images, the path uses `list.manifest.json` (the top-level manifest index path), not the per-platform `sha256__<digest>/manifest.json` sub-paths — those are Artifactory storage paths, not the index paths the v2 API expects.
 
-**Important:** This API call runs inside a goroutine with a 30-second timeout. For large images, Xray may take 30–90 seconds to compute a response (it can trigger an on-demand scan internally). If it times out, the plugin falls back to querying the Violations API with no watch filter to get approximate counts — this fallback is less complete but avoids showing all zeros.
+This call is **not watch-scoped** — it returns everything Xray has indexed for the artifact across all policies. This gives a complete picture of the image's vulnerability posture.
+
+The response is deduplicated by `issue_id` (the same CVE appearing in multiple platforms counts as one finding) and parsed into two structures:
+- `SeverityCounts` — aggregate total, critical, high, medium, low counts
+- `[]SummaryIssue` — per-finding detail: `IssueID`, `Severity`, `JFrogSeverity` (JFrog Research severity, may differ from standard), `Fixable` (true if any affected component has a known fix version)
+
+If the v2 API call fails, a warning is logged and all counts default to zero. No fallback query is attempted.
+
+> **Note:** The v1 summary API (`POST /api/v1/summary/artifact`) hangs indefinitely for Docker images. Always use the v2 endpoint (`/api/v2/summary/artifact`).
 
 ---
 
@@ -173,13 +181,14 @@ The result is a single `EnhancedVulnerabilityReport` struct printed as indented 
 
 `outputMarkdownReport()` produces GitHub-flavored markdown in this order:
 
-1. **Header** — image name and a link to the manifest in JFrog Platform UI
-2. **Security banner** — a GitHub alert block:
+1. **Security banner** — a GitHub alert block (rendered before the header for immediate visibility):
    - `[!CAUTION]` (red) if any malicious content found
    - `[!WARNING]` (yellow) if CVEs found but no malicious content
    - `[!NOTE]` (green) if clean
-3. **Security Summary** — total, critical/high/medium/low counts, malicious count, list of platforms scanned. Counts come from the summary API (Phase 4).
+2. **Header** — image name and a link to the manifest in JFrog Platform UI
+3. **Security Summary** — total, critical/high/medium/low counts, malicious count, list of platforms scanned. Counts come from the v2 summary API (Phase 4).
 4. **Malicious Findings table** — only appears if malicious issues exist. Lists each issue ID from the malicious watch.
+5. **Security Findings table** — a collapsible `<details>` block. Summary line shows total count and fixable count: `Security Findings (293 | 47 fixable) — click to expand`. Filtered by `--min-severity` if specified. Sorted Critical→Low, then XRAY-ID. Columns: XRAY-ID, SEVERITY, JFROG SEVERITY, FIXABLE. Fixable status and JFrog Research severity come from the `SummaryIssue` slice returned by Phase 4.
 
 In GitHub Markdown mode, all log output is suppressed (log level set to ERROR) so only the markdown goes to stdout — this makes it safe to pipe directly into a CI pipeline step.
 
@@ -212,10 +221,8 @@ jf jfrog-vulnreport check <image> [flags]
                     ├── FilterManifestsByPlatform()        internal/docker_paths.go
                     ├── [per platform] xraySvc.GetViolations(malicious-watch)
                     │   └── POST /api/v1/violations        → Xray  (builds maliciousLookup)
-                    ├── xraySvc.GetSummaryByChecksums()    internal/xray_sdk.go
-                    │   └── POST /api/v1/summary/artifact  → Xray  (severity counts, 30s timeout)
-                    │   └── [fallback] xraySvc.GetViolations("")
-                    │       └── POST /api/v1/violations    → Xray  (unscoped, counts only)
+                    ├── xraySvc.GetSummaryV2()             internal/xray_sdk.go
+                    │   └── POST /api/v2/summary/artifact  → Xray  (severity counts + per-issue detail)
                 └── outputReport()
                     ├── outputJSONReport()                 internal/check_runner.go
                     │   └── convertToEnhancedReport()
@@ -227,8 +234,8 @@ jf jfrog-vulnreport check <image> [flags]
 
 ## Key Design Decisions Worth Knowing
 
-**Why two watches?**
-The `--watch-name` watch returns all security violations the team cares about. The `--malicious-watch-name` watch is a separate, narrow watch configured to contain only malicious packages. Because the Violations API's `malicious_package` field is unreliable, the plugin uses the dedicated watch as the ground truth — anything that shows up there is definitively malicious.
+**Why a dedicated malicious watch?**
+The `--malicious-watch-name` watch is a narrow, purpose-built watch containing only malicious package violations. The Violations API returns a `malicious_package` boolean on each violation, but that field is unreliable in practice. Using a dedicated watch as the ground truth — anything that appears there is definitively malicious — is more robust and avoids false negatives.
 
-**Why does the summary count exist?**
-The summary API (Phase 4) is unscoped — it counts everything Xray knows about the image regardless of watch policies. This gives a complete picture for compliance reporting. The 30-second timeout and fallback prevent it from stalling the tool indefinitely.
+**Why does the v2 summary API exist alongside the malicious watch query?**
+The v2 summary API (Phase 4) is unscoped — it returns everything Xray has indexed for the image across all policies, not just what one watch captures. This gives a complete picture for compliance reporting. It also returns per-issue `Fixable` status and JFrog Research severity ratings that the Violations API does not provide in the same form. The malicious watch query (Phase 3) remains separate because the v2 summary API does not indicate which issues are malicious.
