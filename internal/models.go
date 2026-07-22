@@ -75,8 +75,9 @@ type VulnerabilityReport struct {
 	MediumCount      int                         `json:"mediumCount"`
 	LowCount         int                         `json:"lowCount"`
 	GeneratedAt      string                      `json:"generatedAt"`
-	IsMultiPlatform   bool         `json:"isMultiPlatform,omitempty"` // true if list.manifest.json was expanded into per-platform entries
-	MaliciousIssues   []string     `json:"maliciousIssues,omitempty"` // issue IDs returned by the malicious watch
+	IsMultiPlatform   bool           `json:"isMultiPlatform,omitempty"` // true if list.manifest.json was expanded into per-platform entries
+	MaliciousIssues   []string       `json:"maliciousIssues,omitempty"` // issue IDs returned by the malicious watch
+	SummaryIssues     []SummaryIssue `json:"-"`                         // per-issue detail from v2 summary API; not serialized
 }
 
 // PlatformVulnerabilityInfo groups vulnerabilities discovered for a single platform variant.

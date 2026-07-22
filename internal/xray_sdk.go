@@ -14,7 +14,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/jfrog/jfrog-client-go/auth"
 	"github.com/jfrog/jfrog-client-go/http/jfroghttpclient"
@@ -102,7 +101,7 @@ func extractCwesFromProperties(props map[string]any) []string {
 	return cwes
 }
 
-// SeverityCounts aggregates vulnerability counts returned by the Xray summary API.
+// SeverityCounts aggregates vulnerability counts from the Xray v2 summary API.
 type SeverityCounts struct {
 	Total    int
 	Critical int
@@ -111,110 +110,116 @@ type SeverityCounts struct {
 	Low      int
 }
 
-// summaryTimeout is the maximum time to wait for the Xray summary API to respond.
-// The /api/v1/summary/artifact endpoint can take 30-90+ seconds for images with many
-// vulnerabilities — it may trigger an on-demand scan. If it does not respond within
-// this window, GetSummaryByChecksums returns an error and severity counts will be 0.
-const summaryTimeout = 30 * time.Second
+// SummaryIssue is a single deduplicated finding from the Xray v2 summary API.
+type SummaryIssue struct {
+	IssueID       string // Xray issue identifier (e.g. XRAY-12345)
+	Severity      string // Standard severity: Critical, High, Medium, Low
+	JFrogSeverity string // JFrog Research severity (may differ from standard); empty if not provided
+	Fixable       bool   // True if at least one affected component has a known fix version
+}
 
-// GetSummaryByChecksums queries POST /api/v1/summary/artifact with artifact checksums
-// and returns deduplicated severity counts. This call is not watch-scoped — it returns
-// all vulnerabilities Xray knows about regardless of watch policies. Results are
-// deduplicated by issue_id so a CVE present in multiple platforms is counted once.
-//
-// The call runs in a goroutine and is bounded by summaryTimeout. On timeout the function
-// returns an error; the goroutine continues running until Xray eventually responds, then
-// discards the result (safe for CLI processes that exit shortly after).
-func (xs *XrayService) GetSummaryByChecksums(checksums []string) (SeverityCounts, error) {
+// GetSummaryV2 queries POST /api/v2/summary/artifact with a list of artifact paths
+// (each prefixed with the project key, e.g. "default/docker-local/img/tag/manifest.json").
+// Returns deduplicated severity counts and per-issue detail from Xray's indexed scan data
+// without triggering an on-demand scan.
+func (xs *XrayService) GetSummaryV2(paths []string) (SeverityCounts, []SummaryIssue, error) {
 	if xs == nil || xs.XrayDetails == nil {
-		return SeverityCounts{}, fmt.Errorf("XrayService not initialized")
+		return SeverityCounts{}, nil, fmt.Errorf("XrayService not initialized")
 	}
-	if len(checksums) == 0 {
-		return SeverityCounts{}, nil
+	if len(paths) == 0 {
+		return SeverityCounts{}, nil, nil
 	}
 
 	type summaryReq struct {
-		Checksums []string `json:"checksums"`
+		Paths []string `json:"paths"`
 	}
-	body, err := json.Marshal(summaryReq{Checksums: checksums})
+	body, err := json.Marshal(summaryReq{Paths: paths})
 	if err != nil {
-		return SeverityCounts{}, fmt.Errorf("failed to marshal summary request: %w", err)
+		return SeverityCounts{}, nil, fmt.Errorf("failed to marshal v2 summary request: %w", err)
 	}
 
 	baseURL := strings.TrimRight(xs.XrayDetails.GetUrl(), "/")
-	url := fmt.Sprintf("%s/api/v1/summary/artifact", baseURL)
+	url := fmt.Sprintf("%s/api/v2/summary/artifact", baseURL)
 
-	type result struct {
-		counts SeverityCounts
-		err    error
+	httpDetails := xs.XrayDetails.CreateHttpClientDetails()
+	httpDetails.SetContentTypeApplicationJson()
+
+	resp, respBody, err := xs.client.SendPost(url, body, &httpDetails)
+	if err != nil {
+		return SeverityCounts{}, nil, fmt.Errorf("POST /api/v2/summary/artifact failed: %w", err)
 	}
-	// Buffered so the goroutine can write and exit even after we've timed out.
-	ch := make(chan result, 1)
+	if resp.StatusCode != 200 {
+		return SeverityCounts{}, nil, fmt.Errorf("v2 summary API returned status %d: %s", resp.StatusCode, string(respBody))
+	}
 
-	go func() {
-		httpDetails := xs.XrayDetails.CreateHttpClientDetails()
-		httpDetails.SetContentTypeApplicationJson()
+	type v2ExtendedInfo struct {
+		JFrogResearchSeverity string `json:"jfrog_research_severity"`
+	}
+	type v2Component struct {
+		FixedVersions []string `json:"fixed_versions"`
+	}
+	type v2Issue struct {
+		IssueID             string          `json:"issue_id"`
+		Severity            string          `json:"severity"`
+		ExtendedInformation *v2ExtendedInfo `json:"extended_information"`
+		Components          []v2Component   `json:"components"`
+	}
+	type v2Artifact struct {
+		Issues []v2Issue `json:"issues"`
+	}
+	type v2Resp struct {
+		Artifacts []v2Artifact `json:"artifacts"`
+	}
 
-		resp, respBody, err := xs.client.SendPost(url, body, &httpDetails)
-		if err != nil {
-			ch <- result{SeverityCounts{}, fmt.Errorf("POST /api/v1/summary/artifact failed: %w", err)}
-			return
-		}
-		if resp.StatusCode != 200 {
-			ch <- result{SeverityCounts{}, fmt.Errorf("summary API returned status %d: %s", resp.StatusCode, string(respBody))}
-			return
-		}
+	var parsed v2Resp
+	if err := json.Unmarshal(respBody, &parsed); err != nil {
+		return SeverityCounts{}, nil, fmt.Errorf("failed to parse v2 summary response: %w", err)
+	}
 
-		type summaryIssue struct {
-			IssueID  string `json:"issue_id"`
-			Severity string `json:"severity"`
-		}
-		type summaryArtifact struct {
-			Issues []summaryIssue `json:"issues"`
-		}
-		type summaryResp struct {
-			Artifacts []summaryArtifact `json:"artifacts"`
-		}
-
-		var parsed summaryResp
-		if err := json.Unmarshal(respBody, &parsed); err != nil {
-			ch <- result{SeverityCounts{}, fmt.Errorf("failed to parse summary response: %w", err)}
-			return
-		}
-
-		// Deduplicate by issue_id across all artifacts (same CVE across multiple platforms = 1 finding).
-		seen := make(map[string]string) // issue_id → severity
-		for _, art := range parsed.Artifacts {
-			for _, issue := range art.Issues {
-				if issue.IssueID != "" {
-					seen[issue.IssueID] = issue.Severity
+	// Deduplicate by issue_id across all artifacts (same CVE in multiple platforms = 1 finding).
+	seen := make(map[string]*SummaryIssue)
+	for _, art := range parsed.Artifacts {
+		for _, issue := range art.Issues {
+			if issue.IssueID == "" {
+				continue
+			}
+			if _, exists := seen[issue.IssueID]; exists {
+				continue
+			}
+			si := &SummaryIssue{
+				IssueID:  issue.IssueID,
+				Severity: issue.Severity,
+			}
+			if issue.ExtendedInformation != nil {
+				si.JFrogSeverity = issue.ExtendedInformation.JFrogResearchSeverity
+			}
+			for _, comp := range issue.Components {
+				if len(comp.FixedVersions) > 0 {
+					si.Fixable = true
+					break
 				}
 			}
+			seen[issue.IssueID] = si
 		}
-
-		var counts SeverityCounts
-		counts.Total = len(seen)
-		for _, sev := range seen {
-			switch sev {
-			case "Critical":
-				counts.Critical++
-			case "High":
-				counts.High++
-			case "Medium":
-				counts.Medium++
-			case "Low":
-				counts.Low++
-			}
-		}
-		ch <- result{counts, nil}
-	}()
-
-	select {
-	case r := <-ch:
-		return r.counts, r.err
-	case <-time.After(summaryTimeout):
-		return SeverityCounts{}, fmt.Errorf("summary API did not respond within %s — severity counts will be 0 (Xray may be scanning the artifact)", summaryTimeout)
 	}
+
+	var counts SeverityCounts
+	issues := make([]SummaryIssue, 0, len(seen))
+	for _, si := range seen {
+		issues = append(issues, *si)
+		switch si.Severity {
+		case "Critical":
+			counts.Critical++
+		case "High":
+			counts.High++
+		case "Medium":
+			counts.Medium++
+		case "Low":
+			counts.Low++
+		}
+	}
+	counts.Total = len(seen)
+	return counts, issues, nil
 }
 
 // violationWithMalicious wraps a xrayServices.Vulnerability with its malicious_package flag.

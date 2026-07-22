@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -16,7 +17,6 @@ import (
 	"github.com/jfrog/jfrog-client-go/http/jfroghttpclient"
 	"github.com/jfrog/jfrog-client-go/utils/log"
 	xraySdk "github.com/jfrog/jfrog-client-go/xray"
-	"github.com/jfrog/jfrog-client-go/xray/services"
 )
 
 // Constants for Docker media types recognized during manifest discovery.
@@ -60,6 +60,10 @@ func RunCheckCommand(c *components.Context) error {
 		conf.ProjectKey = "default"
 	}
 
+	if conf.Silent {
+		log.SetLogger(log.NewLogger(log.ERROR, os.Stderr))
+	}
+
 	if conf.MaliciousWatchName == "" {
 		return fmt.Errorf("--malicious-watch-name is required — this watch defines which issue IDs are considered malicious")
 	}
@@ -99,9 +103,6 @@ func RunCheckCommand(c *components.Context) error {
 // artifactoryBaseURL is the JFrog Platform base URL (e.g. "https://company.jfrog.io") used to
 // build UI links; pass empty string to omit link generation.
 func RunCheckCommandFromConf(conf *CheckConfiguration, repoKey, imageName, tag, artifactoryBaseURL string, xraySvc *XrayService, artSvc *ArtifactoryService) error {
-	if conf.Silent {
-		log.SetLogger(log.NewLogger(log.ERROR, os.Stderr))
-	}
 	if !conf.Silent {
 		log.Info(fmt.Sprintf("Checking vulnerabilities for image: %s/%s:%s", repoKey, imageName, tag))
 	}
@@ -132,39 +133,6 @@ func RunCheckCommandFromConf(conf *CheckConfiguration, repoKey, imageName, tag, 
 
 	return nil
 }
-
-// Helper functions for enhanced report formatting
-
-// extractIssueType classifies a vulnerability by its source (CVE, Malware, License, etc.) using the
-// Technology field populated from the Violations API response. Falls back to issue ID pattern matching
-// for legacy compatibility with older Xray data that may not include Technology.
-func extractIssueType(vuln services.Vulnerability) string {
-	// Use JFrog's official issue type classification stored in Technology field
-	if vuln.Technology != "" {
-		// Capitalize first letter for display (using strings.Title is acceptable here since we control the input)
-		issueType := strings.Title(strings.ToLower(vuln.Technology))
-		return issueType
-	}
-
-	// Fallback: classify based on issue ID pattern (for legacy compatibility)
-	if strings.Contains(strings.ToLower(vuln.IssueId), "xray-") {
-		return "Security"
-	}
-	if strings.Contains(strings.ToLower(vuln.IssueId), "license") {
-		return "License"
-	}
-	if strings.Contains(strings.ToLower(vuln.IssueId), "malware") {
-		return "Malware"
-	}
-	if strings.Contains(strings.ToLower(vuln.IssueId), "secret") {
-		return "Secret"
-	}
-	if len(vuln.Cves) > 0 {
-		return "CVE"
-	}
-	return "Security" // Default
-}
-
 
 // generateSecurityBanner renders a GitHub-flavored alert banner (CAUTION/WARNING/NOTE) based on whether
 // the report contains malicious packages or any vulnerabilities.
@@ -250,33 +218,12 @@ func convertToEnhancedReport(report *VulnerabilityReport, maliciousLookup map[st
 	var platforms []EnhancedPlatformInfo
 
 	for _, platform := range report.Platforms {
-		var findings []CompactFinding
-
-		for _, vuln := range platform.Vulnerabilities {
-			issueType := extractIssueType(vuln)
-			if issueType == "" {
-				issueType = "Security"
-			}
-			typeCount[issueType]++
-
-			malicious := maliciousLookup[vuln.IssueId]
-
-			finding := CompactFinding{
-				IssueId:   vuln.IssueId,
-				Type:      issueType,
-				Severity:  vuln.Severity,
-				Malicious: malicious,
-				CveCount:  len(vuln.Cves),
-			}
-			findings = append(findings, finding)
-		}
-
 		enhancedPlatform := EnhancedPlatformInfo{
 			Platform:      platform.Platform,
-			FindingsCount: len(platform.Vulnerabilities),
+			FindingsCount: 0,
 			LayerCount:    platform.LayerCount,
 			SizeMB:        float64(platform.TotalSize) / (1024 * 1024),
-			Findings:      findings,
+			Findings:      nil,
 		}
 		platforms = append(platforms, enhancedPlatform)
 	}
@@ -303,6 +250,8 @@ func convertToEnhancedReport(report *VulnerabilityReport, maliciousLookup map[st
 // parameter is used to render a clickable link to the image's manifest in JFrog Platform UI —
 // constructed as <baseUrl>/ui/repos/tree/General/<repo>/<path>/list.manifest.json without additional HTTP requests.
 func outputMarkdownReport(report *VulnerabilityReport, maliciousLookup map[string]bool, manifestUrl string, minSeverity string) error {
+	generateSecurityBanner(report, maliciousLookup, minSeverity)
+
 	fmt.Printf("# Xray Security Report\n\n")
 	fmt.Printf("## %s\n\n", report.ImageName)
 
@@ -311,8 +260,6 @@ func outputMarkdownReport(report *VulnerabilityReport, maliciousLookup map[strin
 	}
 
 	fmt.Println()
-
-	generateSecurityBanner(report, maliciousLookup, minSeverity)
 
 	fmt.Println("## Security Summary")
 
@@ -339,24 +286,130 @@ func outputMarkdownReport(report *VulnerabilityReport, maliciousLookup map[strin
 		fmt.Printf("## :bangbang: Malicious Findings (%d)\n", maliciousCount)
 		fmt.Println("| Xray ID | Severity |")
 		fmt.Println("|---------|----------|")
-		sorted := make([]string, len(report.MaliciousIssues))
-		copy(sorted, report.MaliciousIssues)
-		for i := 0; i < len(sorted); i++ {
-			for j := i + 1; j < len(sorted); j++ {
-				if sorted[i] > sorted[j] {
-					sorted[i], sorted[j] = sorted[j], sorted[i]
-				}
-			}
-		}
-		for _, id := range sorted {
-			fmt.Printf("| %s | Malicious |\n", id)
+		sortedMal := make([]string, len(report.MaliciousIssues))
+		copy(sortedMal, report.MaliciousIssues)
+		sort.Strings(sortedMal)
+		for _, id := range sortedMal {
+			fmt.Printf("| %s | %s |\n", id, severityLabel("Malicious"))
 		}
 		fmt.Println()
 		fmt.Println("---")
 		fmt.Println()
 	}
 
+	// Security findings table — collapsible, filtered by minSeverity, sorted Critical→Low then XRAY-ID.
+	if len(report.SummaryIssues) > 0 {
+		filtered := make([]SummaryIssue, 0, len(report.SummaryIssues))
+		for _, si := range report.SummaryIssues {
+			if severityMeetsMin(si.Severity, minSeverity) {
+				filtered = append(filtered, si)
+			}
+		}
+		sort.Slice(filtered, func(i, j int) bool {
+			ri, rj := severityRank(filtered[i].Severity), severityRank(filtered[j].Severity)
+			if ri != rj {
+				return ri < rj
+			}
+			return filtered[i].IssueID < filtered[j].IssueID
+		})
+		if len(filtered) > 0 {
+			fmt.Println()
+			fmt.Println("---")
+			fmt.Println()
+			fmt.Printf("<details>\n<summary>Security Findings (%d) — click to expand</summary>\n\n", len(filtered))
+			fmt.Println("| XRAY-ID | SEVERITY | JFROG SEVERITY | FIXABLE |")
+			fmt.Println("|---------|----------|----------------|---------|")
+			for _, si := range filtered {
+				fixable := "No"
+				if si.Fixable {
+					fixable = "Yes"
+				}
+				fmt.Printf("| %s | %s | %s | %s |\n",
+					si.IssueID,
+					severityLabel(si.Severity),
+					jfrogSeverityLabel(si.JFrogSeverity, si.Severity),
+					fixable,
+				)
+			}
+			fmt.Println()
+			fmt.Println("</details>")
+			fmt.Println()
+		}
+	}
+
+	fmt.Println("---")
+	fmt.Println()
+	fmt.Printf("> Xray scans trigger at upload time, but can be matched to new vulnerabilities over time without rescans.\n> These are findings as of %s.\n", report.GeneratedAt)
+	fmt.Println()
+
 	return nil
+}
+
+// severityLabel returns an emoji-prefixed severity label for GitHub Markdown table cells.
+func severityLabel(severity string) string {
+	switch severity {
+	case "Malicious":
+		return "💀 Malicious 💀"
+	case "Critical":
+		return "🟥 Critical"
+	case "High":
+		return "🟧 High"
+	case "Medium":
+		return "🟨 Medium"
+	case "Low":
+		return "🟫 Low"
+	default:
+		return severity
+	}
+}
+
+// jfrogSeverityLabel returns a colored badge for the JFrog Research severity, prefixed with
+// :arrow_up_small: if JFrog rates it higher than the standard severity, or :arrow_down_small:
+// if JFrog rates it lower. No prefix when the ratings match.
+func jfrogSeverityLabel(jfrogSev, standardSev string) string {
+	if jfrogSev == "" {
+		return "-"
+	}
+	badge := severityLabel(jfrogSev)
+	jr, sr := severityRank(jfrogSev), severityRank(standardSev)
+	if jr < sr {
+		return ":arrow_up_small: " + badge
+	}
+	if jr > sr {
+		return ":arrow_down_small: " + badge
+	}
+	return badge
+}
+
+// severityRank returns a sort order for severity strings (lower = more severe).
+func severityRank(s string) int {
+	switch s {
+	case "Critical":
+		return 0
+	case "High":
+		return 1
+	case "Medium":
+		return 2
+	case "Low":
+		return 3
+	default:
+		return 4
+	}
+}
+
+// severityMeetsMin returns true if severity is at least as severe as minSeverity.
+// An empty or unrecognized minSeverity passes everything through.
+func severityMeetsMin(severity, minSeverity string) bool {
+	rank := map[string]int{"Critical": 0, "High": 1, "Medium": 2, "Low": 3}
+	minRank, ok := rank[minSeverity]
+	if !ok {
+		return true
+	}
+	r, ok := rank[severity]
+	if !ok {
+		return true
+	}
+	return r <= minRank
 }
 
 // Missing functions - minimal implementations
@@ -530,64 +583,27 @@ func generateVulnerabilityReport(conf *CheckConfiguration, repoKey, imageName, t
 		log.Debug(fmt.Sprintf("Malicious watch query for path %s returned %d violation(s)", dp.path, len(maliciousResults)))
 	}
 
-	// Collect artifact checksums for the summary API. Strip "sha256:" prefix: single-platform
-	// digests from AQL are raw hex; multi-platform digests from list.manifest.json have the prefix.
-	var summaryChecksums []string
-	seenChecksums := make(map[string]bool)
-	for _, dp := range platformPaths {
-		for _, digest := range dp.digests {
-			hex := strings.TrimPrefix(digest, "sha256:")
-			if hex != "" && !seenChecksums[hex] {
-				seenChecksums[hex] = true
-				summaryChecksums = append(summaryChecksums, hex)
-			}
-		}
-	}
-
-	// Get severity counts from summary API (not watch-scoped — returns all vulnerabilities
-	// Xray knows about regardless of watch policy). Sets the report severity counts used by
-	// the Security Summary section in both JSON and markdown output.
-	// Note: this call can take 30-90s for large images; we time out after summaryTimeout
-	// and fall back to violations-based counts.
-	log.Info(fmt.Sprintf("Fetching vulnerability summary from Xray for %d artifact checksum(s)...", len(summaryChecksums)))
-	summaryCounts, summaryErr := xraySvc.GetSummaryByChecksums(summaryChecksums)
-	if summaryErr != nil {
-		log.Warn(fmt.Sprintf("Summary API: %v — falling back to violations-based counts", summaryErr))
-		// Fallback: query violations with no watch filter to get counts for all watched violations.
-		// This is incomplete compared to the summary API (misses unwatched vulnerabilities) but is
-		// fast and returns a meaningful count instead of zero.
-		fallbackVulnMap := make(map[string]services.Vulnerability)
-		for _, dp := range platformPaths {
-			vv, err := xraySvc.GetViolations("", extractRepoFromPath(dp.path), dp.path, conf.ProjectKey)
-			if err != nil {
-				log.Warn(fmt.Sprintf("Fallback violations query failed for %s: %v", dp.path, err))
-				continue
-			}
-			for _, v := range vv {
-				if v.Vulnerability.IssueId != "" {
-					fallbackVulnMap[v.Vulnerability.IssueId] = v.Vulnerability
-				}
-			}
-		}
-		report.TotalIssues = len(fallbackVulnMap)
-		for _, vuln := range fallbackVulnMap {
-			switch vuln.Severity {
-			case "Critical":
-				report.CriticalCount++
-			case "High":
-				report.HighCount++
-			case "Medium":
-				report.MediumCount++
-			case "Low":
-				report.LowCount++
-			}
-		}
+	// Query Xray v2 summary API for severity counts. Reads cached scan data only — does not
+	// trigger an on-demand scan. Path format: {projectKey}/{repo}/{image}/{tag}/manifest.json
+	// For multi-platform images, the v2 API requires the top-level list.manifest.json path
+	// (not per-platform sha256__ sub-paths, which are Artifactory storage paths, not index paths).
+	isMultiPlatform := len(platformPaths) > 0 && strings.Contains(platformPaths[0].path, "sha256__")
+	var v2TopPath string
+	if isMultiPlatform {
+		v2TopPath = conf.ProjectKey + "/" + repoKey + "/" + imageName + "/" + tag + "/list.manifest.json"
 	} else {
-		report.TotalIssues = summaryCounts.Total
-		report.CriticalCount = summaryCounts.Critical
-		report.HighCount = summaryCounts.High
-		report.MediumCount = summaryCounts.Medium
-		report.LowCount = summaryCounts.Low
+		v2TopPath = conf.ProjectKey + "/" + platformPaths[0].path
+	}
+	counts, issues, err := xraySvc.GetSummaryV2([]string{v2TopPath})
+	if err != nil {
+		log.Warn(fmt.Sprintf("v2 summary API failed, counts will be 0: %v", err))
+	} else {
+		report.TotalIssues = counts.Total
+		report.CriticalCount = counts.Critical
+		report.HighCount = counts.High
+		report.MediumCount = counts.Medium
+		report.LowCount = counts.Low
+		report.SummaryIssues = issues
 	}
 
 	var manifestDigest string
