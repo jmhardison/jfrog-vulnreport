@@ -42,16 +42,16 @@ func RunCheckCommand(c *components.Context) error {
 
 	conf := &CheckConfiguration{
 		ImageName:          c.Arguments[0],
-		ServerId:          c.GetStringFlagValue("server-id"),
-		Platform:          c.GetStringFlagValue("platform"),
-		OS:                c.GetStringFlagValue("os"),
-		FailOnVuln:        c.GetBoolFlagValue("fail-on-vuln"),
-		Output:            output,
-		Silent:            output == "github-md",
-		MinSeverity:       c.GetStringFlagValue("min-severity"),
-		DebugPaths:        c.GetBoolFlagValue("debug-paths"),
-		DockerRegistryURL: c.GetStringFlagValue("docker-registry-url"),
-		ProjectKey:        c.GetStringFlagValue("project-key"),
+		ServerId:           c.GetStringFlagValue("server-id"),
+		Platform:           c.GetStringFlagValue("platform"),
+		OS:                 c.GetStringFlagValue("os"),
+		FailOnVuln:         c.GetBoolFlagValue("fail-on-vuln"),
+		Output:             output,
+		Silent:             output == "github-md",
+		MinSeverity:        c.GetStringFlagValue("min-severity"),
+		DebugPaths:         c.GetBoolFlagValue("debug-paths"),
+		DockerRegistryURL:  c.GetStringFlagValue("docker-registry-url"),
+		ProjectKey:         c.GetStringFlagValue("project-key"),
 		MaliciousWatchName: c.GetStringFlagValue("malicious-watch-name"),
 	}
 
@@ -142,43 +142,45 @@ func generateSecurityBanner(report *VulnerabilityReport, maliciousLookup map[str
 
 	if hasMalicious {
 		// RED banner for malicious content
+		fmt.Println("![Malicious](https://img.shields.io/badge/SECURITY-MALICIOUS_EXPLOIT_PRESENT-red?style=for-the-badge&logo=shield&logoColor=white)")
 		fmt.Println("---")
 		fmt.Println()
 		fmt.Println("> [!CAUTION]")
-		fmt.Println("> ## 🚨 MALICIOUS EXPLOIT PRESENT 🚨")
-		fmt.Println("> **IMMEDIATE ACTION REQUIRED** - Malicious content detected in this image")
+		fmt.Println("> ## :rotating_light: MALICIOUS EXPLOIT PRESENT :rotating_light:")
+		fmt.Println("> **IMMEDIATE ACTION REQUIRED** - Malicious content detected in this image. Remediate or seek guidance from #org-pulsar.")
+		fmt.Println("> Policies can prevent the download and execution of this image, resulting in potential deploy issues such as `imagePullBackoff`.")
+		fmt.Println("> Do `not` promote until confirmed, and stop use of image if not a false positive.")
 		fmt.Println()
-		fmt.Println("![Malicious](https://img.shields.io/badge/SECURITY-MALICIOUS_EXPLOIT_PRESENT-red?style=for-the-badge&logo=shield&logoColor=white)")
 		fmt.Println()
 		fmt.Println("---")
 		fmt.Println()
 	} else if hasFindings {
 		// YELLOW banner for CVEs present
+		fmt.Println("![CVEs Present](https://img.shields.io/badge/SECURITY-CVE'S_PRESENT-yellow?style=for-the-badge&logo=alert&logoColor=black)")
 		fmt.Println("---")
 		fmt.Println()
 		fmt.Println("> [!WARNING]")
-		fmt.Println("> ## ⚠️ CVE's PRESENT")
+		fmt.Println("> ## :warning: CVE's PRESENT")
 		fmt.Println("> Security vulnerabilities found - review and remediate as needed")
+		fmt.Println("> Promotion won't be blocked, however fixable issues should be resolved before promotion when possible.")
 		fmt.Println()
-		fmt.Println("![CVEs Present](https://img.shields.io/badge/SECURITY-CVE'S_PRESENT-yellow?style=for-the-badge&logo=alert&logoColor=black)")
 		fmt.Println()
 		fmt.Println("---")
 		fmt.Println()
 	} else {
 		// GREEN banner for clean image
+		fmt.Println("![No Findings](https://img.shields.io/badge/SECURITY-NO_FINDINGS-green?style=for-the-badge&logo=checkmark&logoColor=white)")
 		fmt.Println("---")
 		fmt.Println()
 		fmt.Println("> [!NOTE]")
-		fmt.Println("> ## ✅ NO FINDINGS")
-		fmt.Println("> No security issues found at the specified threshold - image appears clean")
+		fmt.Println("> ## :white_check_mark: NO FINDINGS")
+		fmt.Println("> No security issues found - image appears clean")
 		fmt.Println()
-		fmt.Println("![No Findings](https://img.shields.io/badge/SECURITY-NO_FINDINGS-green?style=for-the-badge&logo=checkmark&logoColor=white)")
 		fmt.Println()
 		fmt.Println("---")
 		fmt.Println()
 	}
 }
-
 
 // outputReport dispatches to the appropriate formatter based on the requested output format.
 // manifestUrl is used by github-md output to render a clickable link to the image's manifest in JFrog Platform UI —
@@ -349,15 +351,15 @@ func outputMarkdownReport(report *VulnerabilityReport, maliciousLookup map[strin
 func severityLabel(severity string) string {
 	switch severity {
 	case "Malicious":
-		return "💀 Malicious 💀"
+		return ":skull: Malicious :skull:"
 	case "Critical":
-		return "🟥 Critical"
+		return ":red_square: Critical"
 	case "High":
-		return "🟧 High"
+		return ":orange_square: High"
 	case "Medium":
-		return "🟨 Medium"
+		return ":yellow_square: Medium"
 	case "Low":
-		return "🟫 Low"
+		return ":brown_square: Low"
 	default:
 		return severity
 	}
