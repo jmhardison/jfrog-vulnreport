@@ -3,7 +3,7 @@
 This document describes what happens, in order, when you run:
 
 ```
-jf jfrog-vulnreport check <repo>/<image>:<tag> --malicious-watch-name <mw>
+jf vulnreport check <repo>/<image>:<tag> --malicious-watch-name <mw>
 ```
 
 ---
@@ -227,7 +227,7 @@ If `--fail-on-vuln` is set and `report.TotalIssues > 0`, the command returns a n
 ## Call Stack Summary
 
 ```
-jf jfrog-vulnreport check <image> [flags]
+jf vulnreport check <image> [flags]
 └── checkCmd()                             commands/check.go
     └── CheckCommand.Exec()                commands/check.go
         └── RunCheckCommand()              internal/check_runner.go

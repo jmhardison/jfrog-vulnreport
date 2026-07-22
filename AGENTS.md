@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-JFrog CLI plugin that reads existing Xray scan results for a Docker image and outputs a consolidated vulnerability report. Registers as `jf jfrog-vulnreport check`.
+JFrog CLI plugin that reads existing Xray scan results for a Docker image and outputs a consolidated vulnerability report. Registers as `jf vulnreport check`.
 
 **NOT a standalone scanner** — it queries artifacts already indexed in JFrog/Xray and enriches them with security findings from cached scans. Users should use the native JFrog CLI Xray command (or IDE integrations) for scanning, then this plugin for post-scan reporting.
 
@@ -15,15 +15,15 @@ All code changes must compile, pass tests, and be installed before claiming they
 ```bash
 go build ./...                                    # 1. Verify compilation
 go test ./...                                     # 2. Run all tests
-go build -o jfrog-vulnreport . && cp jfrog-vulnreport ~/.jfrog/plugins/jfrog-vulnreport/bin/  # 3. Install binary for JFrog CLI testing
+go build -o vulnreport . && cp vulnreport ~/.jfrog/plugins/vulnreport/bin/  # 3. Install binary for JFrog CLI testing
 ```
 
-**The built binary must be copied to `~/.jfrog/plugins/jfrog-vulnreport/bin/` before testing with the JFrog CLI.** Without this step, `jf jfrog-vulnreport check ...` will not pick up your changes.
+**The built binary must be copied to `~/.jfrog/plugins/vulnreport/bin/` before testing with the JFrog CLI.** Without this step, `jf vulnreport check ...` will not pick up your changes.
 
 ### Production Install (for persistent use)
 
 ```bash
-go build -o jfrog-vulnreport . && jf plugin install jfrog-vulnreport  # Install as JFrog CLI plugin
+go build -o vulnreport . && jf plugin install vulnreport  # Install as JFrog CLI plugin
 ```
 
 ## Architecture Notes
@@ -45,7 +45,7 @@ go build -o jfrog-vulnreport . && jf plugin install jfrog-vulnreport  # Install 
 - `docker_paths.go` — Docker image path discovery. `discoverImageArtifacts` uses AQL search via `ArtifactoryService`; `expandListManifest` builds per-platform paths as `<repo>/<image>/<tag>/sha256__<digest>/manifest.json`; `FilterManifestsByPlatform` filters by os/arch.
 - `xray_sdk.go` — SDK service wrappers. `XrayService` wraps `*jfroghttpclient.JfrogHttpClient` for Xray API calls: `GetViolations` (paginated `POST /api/v1/violations` for malicious lookup) and `GetSummaryV2` (`POST /api/v2/summary/artifact` for severity counts and per-issue detail). `ArtifactoryService` wraps the same client type for Artifactory AQL search (`SearchArtifacts`) and raw artifact fetch (`FetchArtifactBody`). Both mirror the `XscInnerService` pattern from `jfrog-client-go`. Also defines `xrayViolation`, `xrayViolationInfo`, `violationWithMalicious`, `extractCwesFromProperties`, `SeverityCounts`, and `SummaryIssue` (IssueID, Severity, JFrogSeverity, Fixable, Platforms).
 
-**Build / install**: go build + jfrog CLI installation flow; plugin registered with framework via `github.com/jfrog/jfrog-cli-core/v2/plugins`. Plugin name: `jfrog-vulnreport` (lowercase + numbers/dashes, max 30 chars).
+**Build / install**: go build + jfrog CLI installation flow; plugin registered with framework via `github.com/jfrog/jfrog-cli-core/v2/plugins`. Plugin name: `vulnreport`.
 
 ## Testing & Publishing
 
@@ -54,19 +54,19 @@ go build -o jfrog-vulnreport . && jf plugin install jfrog-vulnreport  # Install 
 
 ### Publishing to Registry
 
-1. Add a YAML descriptor (e.g., `jfrog-vulnreport.yml`) to [jfrog-cli-plugins-reg](https://github.com/jfrog/jfrog-cli-plugins-reg/tree/master/plugins)
+1. Add a YAML descriptor (e.g., `vulnreport.yml`) to [jfrog-cli-plugins-reg](https://github.com/jfrog/jfrog-cli-plugins-reg/tree/master/plugins)
 2. Include required fields: `pluginName`, `version` (with `v` prefix), `repository`
 3. Accept the developer terms file from that registry before PR is merged
 
 ### Registry Build & Upload Flow (from /jfrog-vulnreport/)
 
 ```bash
-cat <<EOF > jfrog-vulnreport.yml
-name: jfrog-vulnreport
+cat <<EOF > vulnreport.yml
+name: vulnreport
 summary: Reports vulnerabilities, licenses, components, traceability from Xray scans on Docker images for compliance and supply chain security.
 description: |
   The JFrog CLI vuln-report plugin is a single-command plugin that can query existing vulnerability scan results for an image...
-version: v0.1.2
+version: v0.1.3
 maintainers:
 - name: Jonathan Hardison
   type: individual
@@ -74,7 +74,7 @@ maintainers:
 repository: git+https://github.com/jmhardison/jfrog-vulnreport.git@main
 EOF
 
-cd /jfrog-vulnreport && go build -o jfrog-vulnreport . && jf plugin create --file=jfrog-vulnreport.yml
+cd /jfrog-vulnreport && go build -o vulnreport . && jf plugin create --file=vulnreport.yml
 ```
 
 ## Architecture: Xray Query Pipeline (IMPORTANT)
@@ -191,7 +191,7 @@ The `--project-key` flag is passed in the Violations API query URL (`?projectKey
 │   └── xray_sdk.go      -> XrayService (GetViolations), ArtifactoryService (SearchArtifacts, FetchArtifactBody),
 │                           xrayViolation, violationWithMalicious, extractCwesFromProperties, AQL types
 ├── main.go              -> Entry point: plugin registration, BuildTime, Version
-└── jfrog-vulnreport.yml -> Plugin registry descriptor
+└── vulnreport.yml       -> Plugin registry descriptor
 ```
 
 ## Gotchas / Lessons Learned

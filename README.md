@@ -1,4 +1,4 @@
-# jfrog-vulnreport
+# vulnreport
 
 JFrog CLI plugin that reads **existing Xray scan results** for a Docker image and outputs a consolidated vulnerability report.
 
@@ -7,14 +7,14 @@ JFrog CLI plugin that reads **existing Xray scan results** for a Docker image an
 Install from source:
 
 ```bash
-go build -o jfrog-vulnreport .
-jf plugin install jfrog-vulnreport
+go build -o vulnreport .
+jf plugin install vulnreport
 ```
 
 Uninstall:
 
 ```bash
-jf plugin uninstall jfrog-vulnreport
+jf plugin uninstall vulnreport
 ```
 
 ## Command
@@ -26,7 +26,7 @@ Checks vulnerabilities for a Docker image already scanned by Xray.
 **Usage**
 
 ```bash
-jf jfrog-vulnreport check <repo/image:tag> [flags]
+jf vulnreport check <repo/image:tag> [flags]
 ```
 
 **Flags**
@@ -44,8 +44,8 @@ jf jfrog-vulnreport check <repo/image:tag> [flags]
 **Examples**
 
 ```bash
-jf jfrog-vulnreport check docker-local/team/myapp:1.2.3 --server-id my-server
-jf jfrog-vulnreport check docker-local/team/myapp:1.2.3 --output github-md --min-severity High
+jf vulnreport check docker-local/team/myapp:1.2.3 --server-id my-server
+jf vulnreport check docker-local/team/myapp:1.2.3 --output github-md --min-severity High
 ```
 
 ## Release Notes
