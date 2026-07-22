@@ -1,8 +1,8 @@
-name: jfrog-vulnreport
+name: vulnreport
 summary: Reports vulnerabilities, licenses, components, traceability from Xray scans on Docker images for compliance and supply chain security.
 description: |
   The JFrog CLI vuln-report plugin is a single-command plugin that can query existing vulnerability scan results for an image...
-version: v0.1.2
+version: v0.1.3
 maintainers:
 - name: Jonathan Hardison
   type: individual

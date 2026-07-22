@@ -9,6 +9,7 @@ out
 
 # Template executable
 jfrog-vulnreport
+vulnreport
 
 # Vim
 *~
