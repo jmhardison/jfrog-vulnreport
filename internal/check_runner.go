@@ -154,7 +154,7 @@ func generateSecurityBanner(report *VulnerabilityReport, maliciousLookup map[str
 		fmt.Println()
 		fmt.Println("> [!CAUTION]")
 		fmt.Println("> ## :rotating_light: MALICIOUS EXPLOIT PRESENT :rotating_light:")
-		fmt.Println("> **IMMEDIATE ACTION REQUIRED** - Malicious content detected in this image. Remediate or seek guidance from #org-pulsar.")
+		fmt.Println("> **IMMEDIATE ACTION REQUIRED** - Malicious content detected in this image. Remediate or seek guidance.")
 		fmt.Println("> Policies can prevent the download and execution of this image, resulting in potential deploy issues such as `imagePullBackoff`.")
 		fmt.Println("> Do `not` promote until confirmed, and stop use of image if not a false positive.")
 		fmt.Println()
