@@ -14,7 +14,7 @@ func getApp() components.App {
 	app := components.App{}
 	app.Name = "vulnreport"
 	app.Description = "JFrog vulnerability report tool for Docker images."
-	app.Version = "v0.1.4"
+	app.Version = "v0.1.5"
 	app.Commands = getCommands()
 	return app
 }

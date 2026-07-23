@@ -249,8 +249,9 @@ func convertToEnhancedReport(report *VulnerabilityReport, maliciousLookup map[st
 	}
 
 	return &EnhancedVulnerabilityReport{
-		ImageName:   report.ImageName,
-		GeneratedAt: report.GeneratedAt,
+		ImageName:     report.ImageName,
+		GeneratedAt:   report.GeneratedAt,
+		ImageNotFound: report.ImageNotFound,
 		Summary: SecuritySummary{
 			TotalFindings:  report.TotalIssues,
 			CriticalCount:  report.CriticalCount,
@@ -270,6 +271,17 @@ func convertToEnhancedReport(report *VulnerabilityReport, maliciousLookup map[st
 // parameter is used to render a clickable link to the image's manifest in JFrog Platform UI —
 // constructed as <baseUrl>/ui/repos/tree/General/<repo>/<path>/list.manifest.json without additional HTTP requests.
 func outputMarkdownReport(report *VulnerabilityReport, maliciousLookup map[string]bool, manifestUrl string, minSeverity string, noFindings bool) error {
+	if report.ImageNotFound {
+		fmt.Println("![No Image Found](https://img.shields.io/badge/SECURITY-NO_IMAGE_FOUND-grey?style=for-the-badge&logo=shield&logoColor=white)")
+		fmt.Println("---")
+		fmt.Println()
+		fmt.Printf("# Xray Security Report\n\n")
+		fmt.Printf("## %s\n\n", report.ImageName)
+		fmt.Println("No Image Found - Check the image name/tag, or that publishing is complete.")
+		fmt.Println()
+		return nil
+	}
+
 	generateSecurityBanner(report, maliciousLookup)
 
 	fmt.Printf("# Xray Security Report\n\n")
@@ -551,6 +563,7 @@ func generateVulnerabilityReport(conf *CheckConfiguration, repoKey, imageName, t
 		if !conf.Silent {
 			log.Warn("No artifacts discovered — image may not be indexed in Xray or may use an unexpected path format")
 		}
+		report.ImageNotFound = true
 		return report, map[string]bool{}, nil
 	}
 

@@ -79,6 +79,7 @@ type VulnerabilityReport struct {
 	IsMultiPlatform   bool           `json:"isMultiPlatform,omitempty"` // true if list.manifest.json was expanded into per-platform entries
 	MaliciousIssues   []string       `json:"maliciousIssues,omitempty"` // issue IDs returned by the malicious watch
 	SummaryIssues     []SummaryIssue `json:"-"`                         // per-issue detail from v2 summary API; not serialized
+	ImageNotFound     bool           `json:"imageNotFound,omitempty"`   // true when no Artifactory artifacts were discovered for the image
 }
 
 // PlatformVulnerabilityInfo groups vulnerabilities discovered for a single platform variant.
@@ -103,11 +104,12 @@ type DockerRegistryClient struct {
 // VulnerabilityReport suitable for machine consumption. Includes per-finding malicious status
 // and issue type counts derived from the Violations API response.
 type EnhancedVulnerabilityReport struct {
-	ImageName   string                 `json:"imageName"`
-	GeneratedAt string                 `json:"generatedAt"`
-	Summary     SecuritySummary        `json:"summary"`
-	IssueTypes  map[string]int         `json:"issueTypes"` // Issue type → count (CVE, Malware, etc.)
-	Platforms   []EnhancedPlatformInfo `json:"platforms"`
+	ImageName     string                 `json:"imageName"`
+	GeneratedAt   string                 `json:"generatedAt"`
+	ImageNotFound bool                   `json:"imageNotFound,omitempty"`
+	Summary       SecuritySummary        `json:"summary"`
+	IssueTypes    map[string]int         `json:"issueTypes"` // Issue type → count (CVE, Malware, etc.)
+	Platforms     []EnhancedPlatformInfo `json:"platforms"`
 }
 
 // SecuritySummary provides aggregate counts across all platforms. MaliciousCount is derived from
