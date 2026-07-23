@@ -28,6 +28,8 @@ type CheckCommand struct {
 	ProjectKey       string // Xray project key for violation queries (defaults to "default")
 	MaliciousWatchName string // Xray watch that defines malicious packages (source of truth)
 	NoFindings         bool   // Suppress Security Findings table in output
+	AppName            string // Plugin name passed from main.go for footer rendering
+	AppVersion         string // Plugin version passed from main.go for footer rendering
 }
 
 // NewCheckCommand returns a CheckCommand with defaults matching the CLI flag declarations.
@@ -62,6 +64,8 @@ func (c *CheckCommand) SetDockerRegistryURL(v string) *CheckCommand { c.DockerRe
 func (c *CheckCommand) SetProjectKey(v string) *CheckCommand     { c.ProjectKey = v; return c }
 func (c *CheckCommand) SetMaliciousWatchName(v string) *CheckCommand { c.MaliciousWatchName = v; return c }
 func (c *CheckCommand) SetNoFindings(v bool) *CheckCommand           { c.NoFindings = v; return c }
+func (c *CheckCommand) SetAppName(v string) *CheckCommand            { c.AppName = v; return c }
+func (c *CheckCommand) SetAppVersion(v string) *CheckCommand         { c.AppVersion = v; return c }
 
 // Exec runs the check pipeline with all configured parameters.
 // When xraySvc and artSvc are both set (via SetXrayService/SetArtifactoryService),
@@ -91,6 +95,8 @@ func (c *CheckCommand) Exec() error {
 			ProjectKey:         projectKey,
 			MaliciousWatchName: c.MaliciousWatchName,
 			NoFindings:         c.NoFindings,
+			AppName:            c.AppName,
+			AppVersion:         c.AppVersion,
 		}
 		repoKey, imageName, tag, err := helperinternal.ParseImageName(conf.ImageName)
 		if err != nil {
@@ -129,12 +135,12 @@ func (c *CheckCommand) Exec() error {
 	}
 	ctx.AddBoolFlag("no-findings", c.NoFindings)
 
-	return helperinternal.RunCheckCommand(ctx)
+	return helperinternal.RunCheckCommand(ctx, c.AppName, c.AppVersion)
 }
 
 // GetCheckCommand returns the component.Command registration for the "check" subcommand.
 // It builds a CheckCommand from the components.Context flags and delegates to Exec().
-func GetCheckCommand() components.Command {
+func GetCheckCommand(appName, appVersion string) components.Command {
 	return components.Command{
 		Name:        "check",
 		Description: "Checks existing vulnerability scans for a Docker image across platforms.",
@@ -143,13 +149,13 @@ func GetCheckCommand() components.Command {
 		Flags:       getCheckFlags(),
 		EnvVars:     getCheckEnvVar(),
 		Action: func(c *components.Context) error {
-			return checkCmd(c)
+			return checkCmd(c, appName, appVersion)
 		},
 	}
 }
 
 // checkCmd is the original action callback — kept for backward compatibility with tests.
-func checkCmd(c *components.Context) error {
+func checkCmd(c *components.Context, appName, appVersion string) error {
 	if len(c.Arguments) == 0 {
 		return fmt.Errorf("image name is required. Usage: check <image:tag>")
 	}
@@ -171,7 +177,9 @@ func checkCmd(c *components.Context) error {
 		SetDockerRegistryURL(c.GetStringFlagValue("docker-registry-url")).
 		SetProjectKey(c.GetStringFlagValue("project-key")).
 		SetMaliciousWatchName(c.GetStringFlagValue("malicious-watch-name")).
-		SetNoFindings(c.GetBoolFlagValue("no-findings"))
+		SetNoFindings(c.GetBoolFlagValue("no-findings")).
+		SetAppName(appName).
+		SetAppVersion(appVersion)
 
 	return cmd.Exec()
 }

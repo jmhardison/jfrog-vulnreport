@@ -9,6 +9,7 @@ import (
 	"github.com/jfrog/jfrog-client-go/xray/services"
 )
 
+
 // DockerManifest represents a single-platform Docker image manifest (v2 schema).
 // Stored in Artifactory under <repo>/<image>/<tag>/manifest.json.
 type DockerManifest struct {
@@ -62,7 +63,9 @@ type CheckConfiguration struct {
 	DockerRegistryURL string // Override URL for Docker registry (for direct manifest fetch)
 	ProjectKey        string // Xray project key for violation queries (defaults to "default")
 	MaliciousWatchName string // Required: Xray watch that defines malicious packages (source of truth for malicious detection)
-	NoFindings        bool   // Suppress Security Findings table in output (summary and malicious findings still shown)
+	NoFindings         bool   // Suppress Security Findings table in output (summary and malicious findings still shown)
+	AppName            string // Plugin name, set by main.go and threaded through for footer rendering
+	AppVersion         string // Plugin version, set by main.go and threaded through for footer rendering
 }
 
 // VulnerabilityReport is the core report structure returned by generateVulnerabilityReport.

@@ -6,21 +6,26 @@ import (
 	"github.com/jmhardison/jfrog-vulnreport/commands"
 )
 
+const (
+	appName    = "vulnreport"
+	appVersion = "v0.1.6"
+)
+
 func main() {
 	plugins.PluginMain(getApp())
 }
 
 func getApp() components.App {
 	app := components.App{}
-	app.Name = "vulnreport"
+	app.Name = appName
 	app.Description = "JFrog vulnerability report tool for Docker images."
-	app.Version = "v0.1.5"
+	app.Version = appVersion
 	app.Commands = getCommands()
 	return app
 }
 
 func getCommands() []components.Command {
 	return []components.Command{
-		commands.GetCheckCommand(),
+		commands.GetCheckCommand(appName, appVersion),
 	}
 }
