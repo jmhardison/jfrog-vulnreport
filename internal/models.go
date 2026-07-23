@@ -62,6 +62,7 @@ type CheckConfiguration struct {
 	DockerRegistryURL string // Override URL for Docker registry (for direct manifest fetch)
 	ProjectKey        string // Xray project key for violation queries (defaults to "default")
 	MaliciousWatchName string // Required: Xray watch that defines malicious packages (source of truth for malicious detection)
+	NoFindings        bool   // Suppress Security Findings table in output (summary and malicious findings still shown)
 }
 
 // VulnerabilityReport is the core report structure returned by generateVulnerabilityReport.

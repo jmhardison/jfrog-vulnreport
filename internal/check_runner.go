@@ -53,6 +53,7 @@ func RunCheckCommand(c *components.Context) error {
 		DockerRegistryURL:  c.GetStringFlagValue("docker-registry-url"),
 		ProjectKey:         c.GetStringFlagValue("project-key"),
 		MaliciousWatchName: c.GetStringFlagValue("malicious-watch-name"),
+		NoFindings:         c.GetBoolFlagValue("no-findings"),
 	}
 
 	// Default project key to "default" if not specified.
@@ -123,7 +124,7 @@ func RunCheckCommandFromConf(conf *CheckConfiguration, repoKey, imageName, tag, 
 		uiPortalManifestUrl = fmt.Sprintf("%s/ui/repos/tree/Xray/%s", artifactoryBaseURL, manifestPath)
 	}
 
-	if err := outputReport(report, maliciousLookup, conf.Output, uiPortalManifestUrl, conf.MinSeverity); err != nil {
+	if err := outputReport(report, maliciousLookup, conf.Output, uiPortalManifestUrl, conf.MinSeverity, conf.NoFindings); err != nil {
 		return fmt.Errorf("failed to output report: %w", err)
 	}
 
@@ -202,12 +203,12 @@ func generateSecurityBanner(report *VulnerabilityReport, maliciousLookup map[str
 // outputReport dispatches to the appropriate formatter based on the requested output format.
 // manifestUrl is used by github-md output to render a clickable link to the image's manifest in JFrog Platform UI —
 // no additional API calls needed, just URL construction from server config.
-func outputReport(report *VulnerabilityReport, maliciousLookup map[string]bool, output string, manifestUrl string, minSeverity string) error {
+func outputReport(report *VulnerabilityReport, maliciousLookup map[string]bool, output string, manifestUrl string, minSeverity string, noFindings bool) error {
 	switch output {
 	case "json":
 		return outputJSONReport(report, maliciousLookup)
 	case "github-md":
-		return outputMarkdownReport(report, maliciousLookup, manifestUrl, minSeverity)
+		return outputMarkdownReport(report, maliciousLookup, manifestUrl, minSeverity, noFindings)
 	default:
 		return fmt.Errorf("unsupported output format: %s. Use 'json' or 'github-md'", output)
 	}
@@ -268,7 +269,7 @@ func convertToEnhancedReport(report *VulnerabilityReport, maliciousLookup map[st
 // lookup map (no Events API calls) for per-finding malicious status and summary counts. The manifestUrl
 // parameter is used to render a clickable link to the image's manifest in JFrog Platform UI —
 // constructed as <baseUrl>/ui/repos/tree/General/<repo>/<path>/list.manifest.json without additional HTTP requests.
-func outputMarkdownReport(report *VulnerabilityReport, maliciousLookup map[string]bool, manifestUrl string, minSeverity string) error {
+func outputMarkdownReport(report *VulnerabilityReport, maliciousLookup map[string]bool, manifestUrl string, minSeverity string, noFindings bool) error {
 	generateSecurityBanner(report, maliciousLookup)
 
 	fmt.Printf("# Xray Security Report\n\n")
@@ -317,7 +318,7 @@ func outputMarkdownReport(report *VulnerabilityReport, maliciousLookup map[strin
 	}
 
 	// Security findings table — collapsible, filtered by minSeverity, sorted Critical→Low then XRAY-ID.
-	if len(report.SummaryIssues) > 0 {
+	if !noFindings && len(report.SummaryIssues) > 0 {
 		filtered := make([]SummaryIssue, 0, len(report.SummaryIssues))
 		for _, si := range report.SummaryIssues {
 			if severityMeetsMin(si.Severity, minSeverity) {

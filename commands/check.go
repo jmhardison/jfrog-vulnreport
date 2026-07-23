@@ -27,6 +27,7 @@ type CheckCommand struct {
 	DockerRegistryURL string // Override URL for Docker registry (for direct manifest fetch)
 	ProjectKey       string // Xray project key for violation queries (defaults to "default")
 	MaliciousWatchName string // Xray watch that defines malicious packages (source of truth)
+	NoFindings         bool   // Suppress Security Findings table in output
 }
 
 // NewCheckCommand returns a CheckCommand with defaults matching the CLI flag declarations.
@@ -60,6 +61,7 @@ func (c *CheckCommand) SetDebugPaths(v bool) *CheckCommand       { c.DebugPaths 
 func (c *CheckCommand) SetDockerRegistryURL(v string) *CheckCommand { c.DockerRegistryURL = v; return c }
 func (c *CheckCommand) SetProjectKey(v string) *CheckCommand     { c.ProjectKey = v; return c }
 func (c *CheckCommand) SetMaliciousWatchName(v string) *CheckCommand { c.MaliciousWatchName = v; return c }
+func (c *CheckCommand) SetNoFindings(v bool) *CheckCommand           { c.NoFindings = v; return c }
 
 // Exec runs the check pipeline with all configured parameters.
 // When xraySvc and artSvc are both set (via SetXrayService/SetArtifactoryService),
@@ -88,6 +90,7 @@ func (c *CheckCommand) Exec() error {
 			DockerRegistryURL:  c.DockerRegistryURL,
 			ProjectKey:         projectKey,
 			MaliciousWatchName: c.MaliciousWatchName,
+			NoFindings:         c.NoFindings,
 		}
 		repoKey, imageName, tag, err := helperinternal.ParseImageName(conf.ImageName)
 		if err != nil {
@@ -124,6 +127,7 @@ func (c *CheckCommand) Exec() error {
 	if c.MaliciousWatchName != "" {
 		ctx.AddStringFlag("malicious-watch-name", c.MaliciousWatchName)
 	}
+	ctx.AddBoolFlag("no-findings", c.NoFindings)
 
 	return helperinternal.RunCheckCommand(ctx)
 }
@@ -166,7 +170,8 @@ func checkCmd(c *components.Context) error {
 		SetDebugPaths(c.GetBoolFlagValue("debug-paths")).
 		SetDockerRegistryURL(c.GetStringFlagValue("docker-registry-url")).
 		SetProjectKey(c.GetStringFlagValue("project-key")).
-		SetMaliciousWatchName(c.GetStringFlagValue("malicious-watch-name"))
+		SetMaliciousWatchName(c.GetStringFlagValue("malicious-watch-name")).
+		SetNoFindings(c.GetBoolFlagValue("no-findings"))
 
 	return cmd.Exec()
 }
@@ -223,6 +228,11 @@ func getCheckFlags() []components.Flag {
 		components.NewStringFlag(
 			"malicious-watch-name",
 			"Xray watch that defines malicious packages (source of truth for malicious detection). Required.",
+		),
+		components.NewBoolFlag(
+			"no-findings",
+			"Suppress the Security Findings table in output. Summary counts and malicious findings are still shown.",
+			components.WithBoolDefaultValue(false),
 		),
 	}
 }
