@@ -364,7 +364,7 @@ func (xs *XrayService) GetViolations(watchName, repo, path, projectKey string) (
 		log.Info(fmt.Sprintf("[XrayService] resp status=%d body_len=%d", resp.StatusCode, len(respBody)))
 
 		if resp.StatusCode != 200 {
-			return nil, fmt.Errorf("Xray returned status %d: %s", resp.StatusCode, string(respBody))
+			return nil, fmt.Errorf("xray returned status %d: %s", resp.StatusCode, string(respBody))
 		}
 
 		var parsed violationResponse
@@ -544,7 +544,7 @@ func (as *ArtifactoryService) FetchArtifactBody(repoKey, artifactPath string) ([
 		return nil, fmt.Errorf("GET artifact failed: %w", err)
 	}
 	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("Artifactory returned status %d for %s", resp.StatusCode, url)
+		return nil, fmt.Errorf("artifactory returned status %d for %s", resp.StatusCode, url)
 	}
 	return body, nil
 }

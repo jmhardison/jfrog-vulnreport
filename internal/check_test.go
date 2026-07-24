@@ -286,7 +286,7 @@ func TestGithubMDOutputNoLogLeakage(t *testing.T) {
 
 	_ = RunCheckCommandFromConf(conf, "docker-local", "noexist", "notag", srv.URL, xraySvc, artSvc)
 
-	w.Close()
+	require.NoError(t, w.Close())
 	os.Stdout = origStdout
 
 	var buf bytes.Buffer
@@ -351,7 +351,7 @@ func captureStdout(t *testing.T, fn func()) string {
 	old := os.Stdout
 	os.Stdout = w
 	fn()
-	w.Close()
+	require.NoError(t, w.Close())
 	os.Stdout = old
 	var buf bytes.Buffer
 	_, _ = buf.ReadFrom(r)
