@@ -64,7 +64,7 @@ func discoverImageArtifacts(artSvc *ArtifactoryService, repoKey, imageName, tag 
 
 			if isListManifest {
 				listManifestArt = &art // Remember the list manifest for later expansion
-				log.Info(fmt.Sprintf("Multi-platform image detected via list.manifest.json"))
+				log.Info("Multi-platform image detected via list.manifest.json")
 			} else {
 				singlePlatformPaths = append(singlePlatformPaths, dockerPath{
 					path:    path,
@@ -94,7 +94,7 @@ func discoverImageArtifacts(artSvc *ArtifactoryService, repoKey, imageName, tag 
 
 	// Single-platform image (or no list manifest found)
 	if len(singlePlatformPaths) > 0 {
-		log.Info(fmt.Sprintf("Single-platform image detected via manifest.json"))
+		log.Info("Single-platform image detected via manifest.json")
 	} else {
 		log.Debug("No manifest files found in Artifactory search results")
 	}
