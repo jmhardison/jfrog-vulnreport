@@ -67,22 +67,17 @@ go build -o vulnreport . && jf plugin install vulnreport  # Install as JFrog CLI
 
 ### Publishing to Registry
 
-1. Add a YAML descriptor (e.g., `vulnreport.yml`) to [jfrog-cli-plugins-reg](https://github.com/jfrog/jfrog-cli-plugins-reg/tree/master/plugins)
-2. Include required fields: `pluginName`, `version` (with `v` prefix), `repository`
-3. Accept the developer terms file from that registry before PR is merged
+1. Add a YAML descriptor named `vulnreport.yml` to [jfrog-cli-plugins-reg](https://github.com/jfrog/jfrog-cli-plugins-reg/tree/master/plugins) — this file lives in that repo, not this one
+2. Required fields: `pluginName`, `version` (with `v` prefix), `repository`, `maintainers` (list of GitHub usernames)
+3. Accept the developer terms file from that registry before the PR is merged
 
-### Registry Build & Upload Flow (from /jfrog-vulnreport/)
-
-```bash
-cat <<EOF > vulnreport.yml
+**Descriptor format** (submit to jfrog-cli-plugins-reg, not stored here):
+```yaml
 pluginName: vulnreport
 version: v0.1.7
 repository: https://github.com/jmhardison/jfrog-vulnreport
 maintainers:
   - jmhardison
-EOF
-
-cd /jfrog-vulnreport && go build -o vulnreport . && jf plugin create --file=vulnreport.yml
 ```
 
 ## Architecture: Xray Query Pipeline (IMPORTANT)
@@ -198,8 +193,7 @@ The `--project-key` flag is passed in the Violations API query URL (`?projectKey
 │   ├── docker_paths.go  -> discoverImageArtifacts, expandListManifest, FilterManifestsByPlatform, rtArtifact
 │   └── xray_sdk.go      -> XrayService (GetViolations), ArtifactoryService (SearchArtifacts, FetchArtifactBody),
 │                           xrayViolation, violationWithMalicious, extractCwesFromProperties, AQL types
-├── main.go              -> Entry point: plugin registration, BuildTime, Version
-└── vulnreport.yml       -> Plugin registry descriptor
+└── main.go              -> Entry point: plugin registration, BuildTime, Version
 ```
 
 ## Gotchas / Lessons Learned

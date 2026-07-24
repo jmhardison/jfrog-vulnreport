@@ -1,5 +1,0 @@
-pluginName: vulnreport
-version: v0.1.7
-repository: https://github.com/jmhardison/jfrog-vulnreport
-maintainers:
-  - jmhardison
