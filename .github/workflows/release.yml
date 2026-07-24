@@ -16,9 +16,16 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      - name: Get GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+
       - uses: actions/checkout@v7
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ steps.app-token.outputs.token }}
           ref: main
           fetch-depth: 0
           fetch-tags: true
@@ -71,6 +78,7 @@ jobs:
           sed -i "s|appVersion = \"v[0-9]*\.[0-9]*\.[0-9]*\"|appVersion = \"$NEW\"|" main.go
 
       - name: Update RELEASE.md
+        id: release_notes
         env:
           NEW_VERSION: ${{ steps.next.outputs.version }}
         run: |
@@ -100,6 +108,14 @@ jobs:
             tail -n +2 RELEASE.md
           } > RELEASE.md.tmp && mv RELEASE.md.tmp RELEASE.md
 
+          # Expose commit list as a step output for the GitHub release body.
+          # Use the multiline output delimiter so newlines are preserved.
+          {
+            echo "notes<<EOF"
+            printf '%s\n' "$COMMITS"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Commit and push version bump
         run: |
           NEW="${{ steps.next.outputs.version }}"
@@ -116,5 +132,16 @@ jobs:
         with:
           use-version: ${{ steps.next.outputs.version }}
           ref: main
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ steps.app-token.outputs.token }}
           workspace: ${{ github.workspace }}
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          NEW_VERSION: ${{ steps.next.outputs.version }}
+          NOTES: ${{ steps.release_notes.outputs.notes }}
+        run: |
+          gh release create "$NEW_VERSION" \
+            --title "$NEW_VERSION" \
+            --notes "$NOTES" \
+            --target main
