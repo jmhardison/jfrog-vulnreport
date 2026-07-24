@@ -149,7 +149,8 @@ func generateSecurityBanner(report *VulnerabilityReport, maliciousLookup map[str
 	hasCritical := report.CriticalCount > 0
 	hasFindings := report.TotalIssues > 0
 
-	if hasMalicious {
+	switch {
+	case hasMalicious:
 		// RED banner for malicious content
 		fmt.Println("![Malicious](https://img.shields.io/badge/SECURITY-MALICIOUS_EXPLOIT_PRESENT-red?style=for-the-badge&logo=shield&logoColor=white)")
 		fmt.Println("---")
@@ -163,7 +164,7 @@ func generateSecurityBanner(report *VulnerabilityReport, maliciousLookup map[str
 		fmt.Println()
 		fmt.Println("---")
 		fmt.Println()
-	} else if hasCritical {
+	case hasCritical:
 		// ORANGE banner for critical CVEs (no malicious)
 		fmt.Println("![Critical CVEs](https://img.shields.io/badge/SECURITY-CRITICAL_CVE'S_PRESENT-orange?style=for-the-badge&logo=alert&logoColor=white)")
 		fmt.Println("---")
@@ -176,7 +177,7 @@ func generateSecurityBanner(report *VulnerabilityReport, maliciousLookup map[str
 		fmt.Println()
 		fmt.Println("---")
 		fmt.Println()
-	} else if hasFindings {
+	case hasFindings:
 		// YELLOW banner for non-critical CVEs present
 		fmt.Println("![CVEs Present](https://img.shields.io/badge/SECURITY-CVE'S_PRESENT-yellow?style=for-the-badge&logo=alert&logoColor=black)")
 		fmt.Println("---")
@@ -189,7 +190,7 @@ func generateSecurityBanner(report *VulnerabilityReport, maliciousLookup map[str
 		fmt.Println()
 		fmt.Println("---")
 		fmt.Println()
-	} else {
+	default:
 		// GREEN banner for clean image
 		fmt.Println("![No Findings](https://img.shields.io/badge/SECURITY-NO_FINDINGS-green?style=for-the-badge&logo=checkmark&logoColor=white)")
 		fmt.Println("---")
@@ -584,14 +585,12 @@ func generateVulnerabilityReport(conf *CheckConfiguration, repoKey, imageName, t
 	// Step 2: Apply platform filtering if specified.
 	// --platform accepts "os/arch" (e.g., "linux/amd64") or OS only (e.g., "linux").
 	if conf.Platform != "" {
-		osFilter := ""
 		arch := ""
+		osFilter := conf.Platform
 		parts := strings.SplitN(conf.Platform, "/", 2)
 		if len(parts) == 2 {
 			osFilter = parts[0]
 			arch = parts[1]
-		} else {
-			osFilter = conf.Platform
 		}
 		filtered := FilterManifestsByPlatform(platformPaths, arch, osFilter)
 		if len(filtered) == 0 {

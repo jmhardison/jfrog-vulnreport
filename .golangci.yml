@@ -1,0 +1,23 @@
+linters:
+  disable-all: true
+  enable:
+    - govet
+    - errcheck
+    - gosimple
+    - ineffassign
+    - staticcheck
+    - typecheck
+    - unused
+    - gocritic
+    - asasalint
+    - asciicheck
+    - errchkjson
+    - copyloopvar
+    - forcetypeassert
+    - makezero
+    - nilerr
+    - unparam
+    - unconvert
+    - wastedassign
+    - usestdlibvars
+    - gosec

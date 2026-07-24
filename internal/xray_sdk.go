@@ -13,6 +13,7 @@ package internal
 import (
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"slices"
 	"sort"
 	"strings"
@@ -153,7 +154,7 @@ func (xs *XrayService) GetSummaryV2(paths, labels []string) (SeverityCounts, []S
 	if err != nil {
 		return SeverityCounts{}, nil, fmt.Errorf("POST /api/v2/summary/artifact failed: %w", err)
 	}
-	if resp.StatusCode != 200 {
+	if resp.StatusCode != http.StatusOK {
 		return SeverityCounts{}, nil, fmt.Errorf("v2 summary API returned status %d: %s", resp.StatusCode, string(respBody))
 	}
 
@@ -363,7 +364,7 @@ func (xs *XrayService) GetViolations(watchName, repo, path, projectKey string) (
 
 		log.Info(fmt.Sprintf("[XrayService] resp status=%d body_len=%d", resp.StatusCode, len(respBody)))
 
-		if resp.StatusCode != 200 {
+		if resp.StatusCode != http.StatusOK {
 			return nil, fmt.Errorf("xray returned status %d: %s", resp.StatusCode, string(respBody))
 		}
 
@@ -501,7 +502,7 @@ func (as *ArtifactoryService) SearchArtifacts(pattern string) ([]rtArtifact, err
 	if err != nil {
 		return nil, fmt.Errorf("AQL search failed: %w", err)
 	}
-	if resp.StatusCode != 200 {
+	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("AQL search returned status %d: %s", resp.StatusCode, string(respBody))
 	}
 
@@ -543,7 +544,7 @@ func (as *ArtifactoryService) FetchArtifactBody(repoKey, artifactPath string) ([
 	if err != nil {
 		return nil, fmt.Errorf("GET artifact failed: %w", err)
 	}
-	if resp.StatusCode != 200 {
+	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("artifactory returned status %d for %s", resp.StatusCode, url)
 	}
 	return body, nil
