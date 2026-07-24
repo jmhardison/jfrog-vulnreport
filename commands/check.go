@@ -18,8 +18,7 @@ type CheckCommand struct {
 	// Flag values — set by fluent setters from main.go Action callback.
 	Image            string // Full image reference (e.g., "docker-local/myimage:latest")
 	ServerId         string // JFrog CLI server configuration ID
-	Platform         string // Platform filter in "os/arch" format (e.g., "linux/amd64")
-	OS               string // OS filter (extracted from Platform if not set separately)
+	Platform         string // Platform filter: "os/arch" (e.g., "linux/amd64") or OS only (e.g., "linux")
 	FailOnVuln       bool   // Exit non-zero if any vulnerabilities found
 	Output           string // Output format: "json" or "github-md"
 	MinSeverity      string // Minimum severity to display: Low, Medium, High, Critical, Malicious
@@ -55,7 +54,6 @@ func (c *CheckCommand) SetArtifactoryService(svc *helperinternal.ArtifactoryServ
 func (c *CheckCommand) SetImage(v string) *CheckCommand          { c.Image = v; return c }
 func (c *CheckCommand) SetServerId(v string) *CheckCommand       { c.ServerId = v; return c }
 func (c *CheckCommand) SetPlatform(v string) *CheckCommand       { c.Platform = v; return c }
-func (c *CheckCommand) SetOS(v string) *CheckCommand             { c.OS = v; return c }
 func (c *CheckCommand) SetFailOnVuln(v bool) *CheckCommand       { c.FailOnVuln = v; return c }
 func (c *CheckCommand) SetOutput(v string) *CheckCommand         { c.Output = v; return c }
 func (c *CheckCommand) SetMinSeverity(v string) *CheckCommand    { c.MinSeverity = v; return c }
@@ -73,6 +71,9 @@ func (c *CheckCommand) SetAppVersion(v string) *CheckCommand         { c.AppVers
 // unit tests without a live JFrog server.
 func (c *CheckCommand) Exec() error {
 	if c.xraySvc != nil && c.artSvc != nil {
+		if c.MaliciousWatchName == "" {
+			return fmt.Errorf("--malicious-watch-name is required")
+		}
 		output := c.Output
 		if output == "" {
 			output = "json"
@@ -85,7 +86,6 @@ func (c *CheckCommand) Exec() error {
 			ImageName:          c.Image,
 			ServerId:           c.ServerId,
 			Platform:           c.Platform,
-			OS:                 c.OS,
 			FailOnVuln:         c.FailOnVuln,
 			Output:             output,
 			Silent:             output == "github-md",
@@ -112,9 +112,6 @@ func (c *CheckCommand) Exec() error {
 	}
 	if c.Platform != "" {
 		ctx.AddStringFlag("platform", c.Platform)
-	}
-	if c.OS != "" {
-		ctx.AddStringFlag("os", c.OS)
 	}
 	ctx.AddBoolFlag("fail-on-vuln", c.FailOnVuln)
 	if c.Output != "" {
@@ -169,7 +166,6 @@ func checkCmd(c *components.Context, appName, appVersion string) error {
 		SetImage(c.Arguments[0]).
 		SetServerId(c.GetStringFlagValue("server-id")).
 		SetPlatform(c.GetStringFlagValue("platform")).
-		SetOS(c.GetStringFlagValue("os")).
 		SetFailOnVuln(c.GetBoolFlagValue("fail-on-vuln")).
 		SetOutput(output).
 		SetMinSeverity(c.GetStringFlagValue("min-severity")).
@@ -201,11 +197,7 @@ func getCheckFlags() []components.Flag {
 		),
 		components.NewStringFlag(
 			"platform",
-			"Filter results by platform architecture (e.g., amd64, arm64).",
-		),
-		components.NewStringFlag(
-			"os",
-			"Filter results by operating system (e.g., linux, windows).",
+			"Filter results by platform (e.g., linux/amd64) or OS only (e.g., linux).",
 		),
 		components.NewBoolFlag(
 			"fail-on-vuln",

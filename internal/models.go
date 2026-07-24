@@ -53,8 +53,7 @@ type Descriptor struct {
 type CheckConfiguration struct {
 	ImageName         string // Full image reference (e.g., "docker-local/myimage:latest")
 	ServerId          string // JFrog CLI server configuration ID
-	Platform          string // Platform filter in "os/arch" format (e.g., "linux/amd64")
-	OS                string // OS filter (extracted from Platform if not set separately)
+	Platform          string // Platform filter: "os/arch" (e.g., "linux/amd64") or OS only (e.g., "linux")
 	FailOnVuln        bool   // Exit non-zero if any vulnerabilities found
 	Output            string // Output format: "json" or "github-md"
 	Silent            bool   // Suppress all log output (used by github-md mode)

@@ -1,10 +1,20 @@
 package internal
 
 import (
+	"bytes"
 	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"strings"
 	"testing"
 
+	artAuth "github.com/jfrog/jfrog-client-go/artifactory/auth"
+	"github.com/jfrog/jfrog-client-go/http/jfroghttpclient"
+	xrayAuth "github.com/jfrog/jfrog-client-go/xray/auth"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestParseImageName(t *testing.T) {
@@ -228,6 +238,71 @@ func TestBuildXrayAPIEndpoint(t *testing.T) {
 	)
 }
 
+
+// TestGithubMDOutputNoLogLeakage verifies that github-md stdout contains only markdown lines —
+// no JFrog SDK log lines (which look like "HH:MM:SS [🔵Info] ..."). This guards against
+// regressions where log.SetLogger is called after the first log.Info, leaking into the output.
+func TestGithubMDOutputNoLogLeakage(t *testing.T) {
+	// Mock Artifactory server: AQL search returns empty results → image-not-found path.
+	// The image-not-found path emits github-md output without any Xray API calls, so we
+	// only need to mock the AQL endpoint.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		if strings.Contains(r.URL.Path, "search/aql") {
+			_, _ = io.WriteString(w, `{"results":[]}`)
+		} else {
+			_, _ = io.WriteString(w, `{}`)
+		}
+	}))
+	defer srv.Close()
+
+	client, err := jfroghttpclient.JfrogClientBuilder().Build()
+	require.NoError(t, err)
+
+	artDetails := artAuth.NewArtifactoryDetails()
+	artDetails.SetUrl(srv.URL + "/")
+	artSvc := NewArtifactoryService(client, artDetails)
+
+	xrayDetails := xrayAuth.NewXrayDetails()
+	xrayDetails.SetUrl(srv.URL + "/")
+	xraySvc := NewXrayService(client, xrayDetails)
+
+	conf := &CheckConfiguration{
+		ImageName:          "docker-local/noexist:notag",
+		Output:             "github-md",
+		Silent:             true,
+		MaliciousWatchName: "test-watch",
+		ProjectKey:         "default",
+		AppName:            "vulnreport",
+		AppVersion:         "vtest",
+	}
+
+	// Capture stdout so we can inspect it for log leakage.
+	origStdout := os.Stdout
+	r, w, pipeErr := os.Pipe()
+	require.NoError(t, pipeErr)
+	os.Stdout = w
+
+	_ = RunCheckCommandFromConf(conf, "docker-local", "noexist", "notag", srv.URL, xraySvc, artSvc)
+
+	w.Close()
+	os.Stdout = origStdout
+
+	var buf bytes.Buffer
+	_, _ = buf.ReadFrom(r)
+	output := buf.String()
+
+	// Every line must be markdown or blank — no log timestamp prefix.
+	for _, line := range strings.Split(output, "\n") {
+		if line == "" {
+			continue
+		}
+		// JFrog log lines start with a time stamp: "HH:MM:SS [..."
+		assert.NotRegexp(t, `^\d{2}:\d{2}:\d{2}`, line,
+			"log line leaked into github-md stdout: %q", line)
+	}
+}
 
 func TestViolationWithMaliciousExtractsFromResponse(t *testing.T) {
 	// Verify that the Violations API response parsing preserves malicious_package status.

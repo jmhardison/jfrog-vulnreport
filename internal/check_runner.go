@@ -44,7 +44,6 @@ func RunCheckCommand(c *components.Context, appName, appVersion string) error {
 		ImageName:          c.Arguments[0],
 		ServerId:           c.GetStringFlagValue("server-id"),
 		Platform:           c.GetStringFlagValue("platform"),
-		OS:                 c.GetStringFlagValue("os"),
 		FailOnVuln:         c.GetBoolFlagValue("fail-on-vuln"),
 		Output:             output,
 		Silent:             output == "github-md",
@@ -106,6 +105,9 @@ func RunCheckCommand(c *components.Context, appName, appVersion string) error {
 // artifactoryBaseURL is the JFrog Platform base URL (e.g. "https://company.jfrog.io") used to
 // build UI links; pass empty string to omit link generation.
 func RunCheckCommandFromConf(conf *CheckConfiguration, repoKey, imageName, tag, artifactoryBaseURL string, xraySvc *XrayService, artSvc *ArtifactoryService) error {
+	if conf.Silent {
+		log.SetLogger(log.NewLogger(log.ERROR, os.Stderr))
+	}
 	if !conf.Silent {
 		log.Info(fmt.Sprintf("Checking vulnerabilities for image: %s/%s:%s", repoKey, imageName, tag))
 	}
@@ -433,6 +435,8 @@ func jfrogSeverityLabel(jfrogSev, standardSev string) string {
 // severityRank returns a sort order for severity strings (lower = more severe).
 func severityRank(s string) int {
 	switch s {
+	case "Malicious":
+		return -1
 	case "Critical":
 		return 0
 	case "High":
@@ -449,7 +453,7 @@ func severityRank(s string) int {
 // severityMeetsMin returns true if severity is at least as severe as minSeverity.
 // An empty or unrecognized minSeverity passes everything through.
 func severityMeetsMin(severity, minSeverity string) bool {
-	rank := map[string]int{"Critical": 0, "High": 1, "Medium": 2, "Low": 3}
+	rank := map[string]int{"Malicious": -1, "Critical": 0, "High": 1, "Medium": 2, "Low": 3}
 	minRank, ok := rank[minSeverity]
 	if !ok {
 		return true
@@ -537,7 +541,7 @@ func newArtifactoryService(serverDetails *configCore.ServerDetails) (*Artifactor
 
 // generateVulnerabilityReport orchestrates the full vulnerability query pipeline:
 //  1. Discovers artifact paths via Artifactory AQL (handles both single and multi-platform images)
-//  2. Optionally filters by --platform / --os
+//  2. Optionally filters by --platform
 //  3. Queries the malicious watch (GetViolations) per platform to build maliciousLookup
 //  4. Queries the v2 summary API (GetSummaryV2) for severity counts and per-issue detail,
 //     including fixable status and per-platform attribution; falls back to list.manifest.json
@@ -577,30 +581,28 @@ func generateVulnerabilityReport(conf *CheckConfiguration, repoKey, imageName, t
 		log.Info(fmt.Sprintf("Discovered %d artifact path(s) for vulnerabilities", len(platformPaths)))
 	}
 
-	// Step 2: Apply platform/OS filtering if specified
-	if conf.Platform != "" || conf.OS != "" {
+	// Step 2: Apply platform filtering if specified.
+	// --platform accepts "os/arch" (e.g., "linux/amd64") or OS only (e.g., "linux").
+	if conf.Platform != "" {
+		osFilter := ""
 		arch := ""
-		if conf.Platform != "" {
-			parts := strings.SplitN(conf.Platform, "/", 2)
-			if len(parts) == 2 {
-				conf.OS = parts[0]
-				arch = parts[1]
-			} else {
-				// --platform without slash: treat entire value as OS
-				conf.OS = conf.Platform
-				arch = ""
-			}
+		parts := strings.SplitN(conf.Platform, "/", 2)
+		if len(parts) == 2 {
+			osFilter = parts[0]
+			arch = parts[1]
+		} else {
+			osFilter = conf.Platform
 		}
-		filtered := FilterManifestsByPlatform(platformPaths, arch, conf.OS)
+		filtered := FilterManifestsByPlatform(platformPaths, arch, osFilter)
 		if len(filtered) == 0 {
 			if !conf.Silent {
-				log.Warn(fmt.Sprintf("No platforms match filter (arch=%q, os=%q)", arch, conf.OS))
+				log.Warn(fmt.Sprintf("No platforms match filter (arch=%q, os=%q)", arch, osFilter))
 			}
 			return report, map[string]bool{}, nil
 		}
 		platformPaths = filtered
 		if !conf.Silent {
-			log.Info(fmt.Sprintf("After platform/OS filtering: %d path(s) remaining", len(platformPaths)))
+			log.Info(fmt.Sprintf("After platform filtering: %d path(s) remaining", len(platformPaths)))
 		}
 	}
 
@@ -613,12 +615,16 @@ func generateVulnerabilityReport(conf *CheckConfiguration, repoKey, imageName, t
 	// --malicious-watch-name watch as the source of truth.
 	maliciousLookup := make(map[string]bool)
 
-	log.Info(fmt.Sprintf("Resolving malicious issue IDs from watch: %s", conf.MaliciousWatchName))
+	if !conf.Silent {
+		log.Info(fmt.Sprintf("Resolving malicious issue IDs from watch: %s", conf.MaliciousWatchName))
+	}
 
+	violationsErrCount := 0
 	for _, dp := range platformPaths {
 		maliciousResults, err := xraySvc.GetViolations(conf.MaliciousWatchName, extractRepoFromPath(dp.path), dp.path, conf.ProjectKey)
 		if err != nil {
 			log.Warn(fmt.Sprintf("Malicious watch query returned error for path %s: %v", dp.path, err))
+			violationsErrCount++
 			continue
 		}
 		for _, r := range maliciousResults {
@@ -628,10 +634,13 @@ func generateVulnerabilityReport(conf *CheckConfiguration, repoKey, imageName, t
 		}
 		log.Debug(fmt.Sprintf("Malicious watch query for path %s returned %d violation(s)", dp.path, len(maliciousResults)))
 	}
+	if violationsErrCount > 0 && violationsErrCount == len(platformPaths) {
+		return report, map[string]bool{}, fmt.Errorf("all malicious watch queries failed — cannot produce a reliable report")
+	}
 
 	// Query Xray v2 summary API for severity counts and per-issue detail.
 	// Build one path+label per discovered platform for per-platform attribution in the findings table.
-	isMultiPlatform := len(platformPaths) > 0 && strings.Contains(platformPaths[0].path, "sha256__")
+	isMultiPlatform := len(platformPaths) > 0 && platformPaths[0].isList
 
 	v2Paths := make([]string, 0, len(platformPaths))
 	v2Labels := make([]string, 0, len(platformPaths))
@@ -697,6 +706,7 @@ func generateVulnerabilityReport(conf *CheckConfiguration, repoKey, imageName, t
 	for issueID := range maliciousLookup {
 		report.MaliciousIssues = append(report.MaliciousIssues, issueID)
 	}
+	sort.Strings(report.MaliciousIssues)
 
 	return report, maliciousLookup, nil
 }

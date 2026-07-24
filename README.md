@@ -32,12 +32,11 @@ jf vulnreport check <repo/image:tag> [flags]
 **Flags**
 
 - `--server-id` JFrog CLI server configuration ID
-- `--platform` Platform architecture filter (`amd64`, `arm64`, ...)
-- `--os` Operating system filter (`linux`, `windows`, ...)
+- `--platform` Platform filter — `os/arch` (e.g., `linux/amd64`) or OS only (e.g., `linux`)
 - `--fail-on-vuln` Exit non-zero if vulnerabilities are found
 - `--output` Output format: `json` (default) or `github-md`
 - `--min-severity` Minimum severity to display (`Low`, `Medium`, `High`, `Critical`, `Malicious`)
-- `--show-findings` Show findings table (default: `true`)
+- `--no-findings` Suppress the Security Findings table in output (summary counts and malicious findings are still shown)
 - `--debug-paths` Enable Xray path discovery logs
 - `--docker-registry-url` Override Docker registry base URL
 

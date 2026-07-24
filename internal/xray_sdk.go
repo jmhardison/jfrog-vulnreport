@@ -439,10 +439,14 @@ func NewArtifactoryService(client *jfroghttpclient.JfrogHttpClient, details auth
 	return &ArtifactoryService{client: client, artDetails: details}
 }
 
-// ArtifactoryURL returns the base Artifactory URL with any trailing slash stripped.
+// ArtifactoryURL returns the JFrog Platform base URL (no /artifactory suffix, no trailing slash).
 // Used by Exec() to derive the UI manifest link when services are injected for testing.
 func (as *ArtifactoryService) ArtifactoryURL() string {
-	return strings.TrimRight(as.artDetails.GetUrl(), "/")
+	u := strings.TrimRight(as.artDetails.GetUrl(), "/")
+	if idx := strings.Index(u, "/artifactory"); idx >= 0 {
+		u = u[:idx]
+	}
+	return u
 }
 
 // AQL response types — used by SearchArtifacts only.
