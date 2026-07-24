@@ -1,0 +1,147 @@
+name: Release on Merge
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    # Only run when the PR was actually merged (not just closed/abandoned).
+    if: github.event.pull_request.merged == true
+    name: Bump version and tag
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Get GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+
+      - uses: actions/checkout@v7
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          ref: main
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Determine bump type from PR labels
+        id: bump
+        env:
+          LABELS: ${{ toJson(github.event.pull_request.labels.*.name) }}
+        run: |
+          if echo "$LABELS" | grep -q '"bump-major"'; then
+            echo "type=major" >> "$GITHUB_OUTPUT"
+          elif echo "$LABELS" | grep -q '"bump-minor"'; then
+            echo "type=minor" >> "$GITHUB_OUTPUT"
+          else
+            echo "type=patch" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Read current version
+        id: current
+        run: |
+          VERSION=$(grep -oP '(?<=appVersion\s=\s")v\d+\.\d+\.\d+' main.go)
+          if [ -z "$VERSION" ]; then
+            echo "Could not parse appVersion from main.go"
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Calculate new version
+        id: next
+        run: |
+          VERSION="${{ steps.current.outputs.version }}"
+          VERSION="${VERSION#v}"
+          MAJOR=$(echo "$VERSION" | cut -d. -f1)
+          MINOR=$(echo "$VERSION" | cut -d. -f2)
+          PATCH=$(echo "$VERSION" | cut -d. -f3)
+
+          case "${{ steps.bump.outputs.type }}" in
+            major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
+            minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
+            *)     PATCH=$((PATCH + 1)) ;;
+          esac
+
+          NEW="v${MAJOR}.${MINOR}.${PATCH}"
+          echo "version=$NEW" >> "$GITHUB_OUTPUT"
+          echo "Bumping ${{ steps.bump.outputs.type }}: ${{ steps.current.outputs.version }} → $NEW"
+
+      - name: Update main.go
+        run: |
+          NEW="${{ steps.next.outputs.version }}"
+          sed -i "s|appVersion = \"v[0-9]*\.[0-9]*\.[0-9]*\"|appVersion = \"$NEW\"|" main.go
+
+      - name: Update RELEASE.md
+        id: release_notes
+        env:
+          NEW_VERSION: ${{ steps.next.outputs.version }}
+        run: |
+          # Find the most recent full semver tag (vX.Y.Z) to use as the range base.
+          # Excludes floating major/minor tags (v0, v0.1) created by issue-ops/semver.
+          PREV_TAG=$(git tag --sort=-version:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
+
+          # Collect non-merge commits since that tag, each as a bullet item.
+          if [ -n "$PREV_TAG" ]; then
+            COMMITS=$(git log "${PREV_TAG}..HEAD" --pretty=format:"- %s" --no-merges)
+          else
+            COMMITS=$(git log --pretty=format:"- %s" --no-merges)
+          fi
+
+          if [ -z "$COMMITS" ]; then
+            COMMITS="- (no changes)"
+          fi
+
+          # Prepend the new section after the # Release Notes header.
+          {
+            head -1 RELEASE.md
+            printf '\n'
+            printf '## %s\n' "$NEW_VERSION"
+            printf '\n'
+            printf '%s\n' "$COMMITS"
+            printf '\n'
+            tail -n +2 RELEASE.md
+          } > RELEASE.md.tmp && mv RELEASE.md.tmp RELEASE.md
+
+          # Expose commit list as a step output for the GitHub release body.
+          # Use the multiline output delimiter so newlines are preserved.
+          {
+            echo "notes<<EOF"
+            printf '%s\n' "$COMMITS"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Commit and push version bump
+        run: |
+          NEW="${{ steps.next.outputs.version }}"
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add main.go RELEASE.md
+          git commit -m "chore: bump version to $NEW [skip ci]"
+          git push
+
+      # issue-ops/semver creates the full set of semver tags (v0.1.8, v0.1, v0)
+      # and pushes them, pointing at the commit we just landed on main.
+      - name: Create semver tags
+        uses: issue-ops/semver@v3.0.0
+        with:
+          use-version: ${{ steps.next.outputs.version }}
+          ref: main
+          token: ${{ steps.app-token.outputs.token }}
+          workspace: ${{ github.workspace }}
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          NEW_VERSION: ${{ steps.next.outputs.version }}
+          NOTES: ${{ steps.release_notes.outputs.notes }}
+        run: |
+          gh release create "$NEW_VERSION" \
+            --title "$NEW_VERSION" \
+            --notes "$NOTES" \
+            --target main

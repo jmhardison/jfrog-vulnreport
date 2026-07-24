@@ -3,7 +3,12 @@ package main
 import (
 	"github.com/jfrog/jfrog-cli-core/v2/plugins"
 	"github.com/jfrog/jfrog-cli-core/v2/plugins/components"
-	"github.com/jfrog/jfrog-cli-plugin-template/commands"
+	"github.com/jmhardison/jfrog-vulnreport/commands"
+)
+
+const (
+	appName    = "vulnreport"
+	appVersion = "v0.1.7"
 )
 
 func main() {
@@ -12,14 +17,15 @@ func main() {
 
 func getApp() components.App {
 	app := components.App{}
-	app.Name = "hello-frog"
-	app.Description = "Easily greet anyone."
-	app.Version = "v0.1.2"
+	app.Name = appName
+	app.Description = "JFrog vulnerability report tool for Docker images."
+	app.Version = appVersion
 	app.Commands = getCommands()
 	return app
 }
 
 func getCommands() []components.Command {
 	return []components.Command{
-		commands.GetHelloCommand()}
+		commands.GetCheckCommand(appName, appVersion),
+	}
 }
