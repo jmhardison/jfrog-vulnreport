@@ -152,7 +152,7 @@ func generateSecurityBanner(report *VulnerabilityReport, maliciousLookup map[str
 	switch {
 	case hasMalicious:
 		// RED banner for malicious content
-		fmt.Println("![Malicious](https://img.shields.io/badge/SECURITY-MALICIOUS_EXPLOIT_PRESENT-red?style=for-the-badge&logo=shield&logoColor=white)")
+		fmt.Println("![Malicious](https://raw.githubusercontent.com/jmhardison/jfrog-vulnreport/main/images/badge-malicious.png)")
 		fmt.Println("---")
 		fmt.Println()
 		fmt.Println("> [!CAUTION]")
@@ -166,7 +166,7 @@ func generateSecurityBanner(report *VulnerabilityReport, maliciousLookup map[str
 		fmt.Println()
 	case hasCritical:
 		// ORANGE banner for critical CVEs (no malicious)
-		fmt.Println("![Critical CVEs](https://img.shields.io/badge/SECURITY-CRITICAL_CVE'S_PRESENT-orange?style=for-the-badge&logo=alert&logoColor=white)")
+		fmt.Println("![Critical CVEs](https://raw.githubusercontent.com/jmhardison/jfrog-vulnreport/main/images/badge-critical-cve.png)")
 		fmt.Println("---")
 		fmt.Println()
 		fmt.Println("> [!CAUTION]")
@@ -179,7 +179,7 @@ func generateSecurityBanner(report *VulnerabilityReport, maliciousLookup map[str
 		fmt.Println()
 	case hasFindings:
 		// YELLOW banner for non-critical CVEs present
-		fmt.Println("![CVEs Present](https://img.shields.io/badge/SECURITY-CVE'S_PRESENT-yellow?style=for-the-badge&logo=alert&logoColor=black)")
+		fmt.Println("![CVEs Present](https://raw.githubusercontent.com/jmhardison/jfrog-vulnreport/main/images/badge-cves-present.png)")
 		fmt.Println("---")
 		fmt.Println()
 		fmt.Println("> [!WARNING]")
@@ -192,7 +192,7 @@ func generateSecurityBanner(report *VulnerabilityReport, maliciousLookup map[str
 		fmt.Println()
 	default:
 		// GREEN banner for clean image
-		fmt.Println("![No Findings](https://img.shields.io/badge/SECURITY-NO_FINDINGS-green?style=for-the-badge&logo=checkmark&logoColor=white)")
+		fmt.Println("![No Findings](https://raw.githubusercontent.com/jmhardison/jfrog-vulnreport/main/images/badge-no-findings.png)")
 		fmt.Println("---")
 		fmt.Println()
 		fmt.Println("> [!NOTE]")
@@ -277,7 +277,7 @@ func convertToEnhancedReport(report *VulnerabilityReport, maliciousLookup map[st
 // constructed as <baseUrl>/ui/repos/tree/General/<repo>/<path>/list.manifest.json without additional HTTP requests.
 func outputMarkdownReport(report *VulnerabilityReport, maliciousLookup map[string]bool, manifestUrl string, minSeverity string, noFindings bool, appName, appVersion string) error {
 	if report.ImageNotFound {
-		fmt.Println("![No Image Found](https://img.shields.io/badge/SECURITY-NO_IMAGE_FOUND-grey?style=for-the-badge&logo=shield&logoColor=white)")
+		fmt.Println("![No Image Found](https://raw.githubusercontent.com/jmhardison/jfrog-vulnreport/main/images/badge-no-image-found.png)")
 		fmt.Println("---")
 		fmt.Println()
 		fmt.Printf("# Xray Security Report\n\n")
