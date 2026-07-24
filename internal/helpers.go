@@ -17,7 +17,7 @@ func GetDigestPaths(repoKey, digest string) []string {
 }
 
 // extractRepoFromPath extracts the repository key from an artifact path.
-// Example: "docker-local/jmhxraytest/10/manifest.json" → "docker-local"
+// Example: "docker-local/myimage/10/manifest.json" → "docker-local"
 func extractRepoFromPath(path string) string {
 	if idx := strings.IndexByte(path, '/'); idx >= 0 {
 		return path[:idx]

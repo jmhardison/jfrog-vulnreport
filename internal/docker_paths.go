@@ -107,7 +107,7 @@ func discoverImageArtifacts(artSvc *ArtifactoryService, repoKey, imageName, tag 
 // using the artifact's full path. Platform digests extracted here are then used as Xray query paths below.
 func expandListManifest(artSvc *ArtifactoryService, listArt *rtArtifact, repoKey, imageName, tag string) ([]dockerPath, error) {
 	// Extract the relative artifact path (everything after the repo key) from the full Artifactory path.
-	// e.g., "docker-local/web-server/latest/list.manifest.json" → "web-server/latest/list.manifest.json"
+	// e.g., "docker-local/myimage/latest/list.manifest.json" → "myimage/latest/list.manifest.json"
 	relPath := listArt.Path
 	if idx := strings.Index(listArt.Path, "/"); idx >= 0 {
 		relPath = listArt.Path[idx+1:]
@@ -180,7 +180,7 @@ func extractSHA256FromPathOrProps(art rtArtifact) string {
 		return strings.TrimPrefix(digest, "sha256:")
 	}
 
-	// Extract from path (e.g., docker-local/jmhxraytest/10/sha256__<digest>/manifest.json)
+	// Extract from path (e.g., docker-local/myimage/10/sha256__<digest>/manifest.json)
 	parts := strings.Split(art.Path, "/")
 	for i, part := range parts {
 		if strings.HasPrefix(part, "sha256__") && i > 0 {

@@ -6,6 +6,19 @@ JFrog CLI plugin that reads existing Xray scan results for a Docker image and ou
 
 **NOT a standalone scanner** — it queries artifacts already indexed in JFrog/Xray and enriches them with security findings from cached scans. Users should use the native JFrog CLI Xray command (or IDE integrations) for scanning, then this plugin for post-scan reporting.
 
+## Environment-Specific Values
+
+The following values are specific to each deployment and **must never be hardcoded in repo files** (source code, comments, tests, docs). They belong only in agent memory or are provided by the user at session time.
+
+| Value | Description |
+|---|---|
+| JFrog Platform hostname | e.g. `https://your-org.jfrog.io` |
+| Malicious watch name | The Xray watch used as the authoritative source for malicious package detection |
+| Smoke test image names | Docker image references used for live smoke tests |
+| Smoke test expected counts | Baseline vulnerability counts for smoke test images |
+
+**When any of these values are needed** (e.g. to run smoke tests or live CLI commands), check agent memory first. If not present in memory, ask the user before proceeding. Never guess or invent these values.
+
 ## Build & Run
 
 ### Local Development Cycle (REQUIRED)

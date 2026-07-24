@@ -13,11 +13,11 @@ import (
 func TestViolationsRequestShape(t *testing.T) {
 	req := violationsRequest{
 		Filters: violationsFilters{
-			WatchName:     "dockerlocal-malicious-critical",
+			WatchName:     "test-malicious-watch",
 			ViolationType: "Security",
 			Resources: violationsResources{
 				Artifacts: []violationsArtifact{
-					{Repo: "docker-local", Path: "jmhxraytest/15/manifest.json"},
+					{Repo: "docker-local", Path: "myimage/v1/manifest.json"},
 				},
 			},
 			IncludeDetails: true,
@@ -34,7 +34,7 @@ func TestViolationsRequestShape(t *testing.T) {
 
 	// Expected shape — exact match against the XrayService.GetViolations wire format.
 	// pagination is always included so the API returns all violations, not just the first 25.
-	expected := `{"filters":{"watch_name":"dockerlocal-malicious-critical","violation_type":"Security","resources":{"artifacts":[{"repo":"docker-local","path":"jmhxraytest/15/manifest.json"}]},"include_details":true},"pagination":{"order_by":"severity","limit":100,"offset":1}}`
+	expected := `{"filters":{"watch_name":"test-malicious-watch","violation_type":"Security","resources":{"artifacts":[{"repo":"docker-local","path":"myimage/v1/manifest.json"}]},"include_details":true},"pagination":{"order_by":"severity","limit":100,"offset":1}}`
 	assert.JSONEq(t, expected, string(body),
 		"Request body must match the wire format Xray expects for /api/v1/violations")
 }

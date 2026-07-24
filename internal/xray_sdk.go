@@ -305,7 +305,7 @@ func (xs *XrayService) GetViolations(watchName, repo, path, projectKey string) (
 		return nil, fmt.Errorf("repo and path are required")
 	}
 
-	// The API expects path without the repo prefix (e.g. "jmhxraytest/15/manifest.json", not "docker-local/jmhxraytest/15/manifest.json").
+	// The API expects path without the repo prefix (e.g. "myimage/v1/manifest.json", not "docker-local/myimage/v1/manifest.json").
 	// Strip the repo prefix if callers passed a full artifact path.
 	if strings.HasPrefix(path, repo+"/") {
 		path = path[len(repo)+1:]
