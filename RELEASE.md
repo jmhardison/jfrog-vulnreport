@@ -1,5 +1,10 @@
 # Release Notes
 
+## v0.1.9
+
+- fix: update from badgeio to baked png images.
+
+
 ## v0.1.8
 
 - feat(init): initial design and implementation. (#8)
