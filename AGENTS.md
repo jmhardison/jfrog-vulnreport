@@ -75,16 +75,11 @@ go build -o vulnreport . && jf plugin install vulnreport  # Install as JFrog CLI
 
 ```bash
 cat <<EOF > vulnreport.yml
-name: vulnreport
-summary: Reports vulnerabilities, licenses, components, traceability from Xray scans on Docker images for compliance and supply chain security.
-description: |
-  The JFrog CLI vuln-report plugin is a single-command plugin that can query existing vulnerability scan results for an image...
-version: v0.1.3
+pluginName: vulnreport
+version: v0.1.7
+repository: https://github.com/jmhardison/jfrog-vulnreport
 maintainers:
-- name: Jonathan Hardison
-  type: individual
-  username: jmhardison
-repository: git+https://github.com/jmhardison/jfrog-vulnreport.git@main
+  - jmhardison
 EOF
 
 cd /jfrog-vulnreport && go build -o vulnreport . && jf plugin create --file=vulnreport.yml
