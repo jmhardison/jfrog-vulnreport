@@ -1,5 +1,11 @@
 # Release Notes
 
+## v0.1.8
+
+- feat(init): initial design and implementation. (#8)
+- Initial commit
+
+
 ## v0.1.7
 
 - Added `--project-key` flag for Xray violation queries scoped to a JFrog project
