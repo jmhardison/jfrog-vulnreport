@@ -74,10 +74,12 @@ func TestParseImageName(t *testing.T) {
 			expectError:   true,
 		},
 		{
-			name:          "Invalid format - no repo and no defaultRepo",
+			name:          "Image without prefix and empty defaultRepo falls back to docker-local",
 			fullImageName: "myapp:latest",
 			defaultRepo:   "",
-			expectError:   true,
+			expectedRepo:  "docker-local",
+			expectedImage: "myapp",
+			expectedTag:   "latest",
 		},
 		{
 			name:          "Invalid format - empty string",

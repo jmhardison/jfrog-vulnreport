@@ -17,7 +17,7 @@ type CheckCommand struct {
 
 	// Flag values — set by fluent setters from main.go Action callback.
 	Image            string // Image reference (e.g., "myimage:latest" or "docker-local/myimage:latest")
-	Repo             string // Artifactory repository key (default: "docker-local")
+	Repo             string // Artifactory repository key passed to ParseImageName; defaults to "docker-local" when empty
 	ServerId         string // JFrog CLI server configuration ID
 	Platform         string // Platform filter: "os/arch" (e.g., "linux/amd64") or OS only (e.g., "linux")
 	FailOnVuln       bool   // Exit non-zero if any vulnerabilities found
@@ -84,13 +84,8 @@ func (c *CheckCommand) Exec() error {
 		if projectKey == "" {
 			projectKey = "default"
 		}
-		repo := c.Repo
-		if repo == "" {
-			repo = "docker-local"
-		}
 		conf := &helperinternal.CheckConfiguration{
 			ImageName:          c.Image,
-			Repo:               repo,
 			ServerId:           c.ServerId,
 			Platform:           c.Platform,
 			FailOnVuln:         c.FailOnVuln,
@@ -105,7 +100,7 @@ func (c *CheckCommand) Exec() error {
 			AppName:            c.AppName,
 			AppVersion:         c.AppVersion,
 		}
-		repoKey, imageName, tag, err := helperinternal.ParseImageName(conf.ImageName, conf.Repo)
+		repoKey, imageName, tag, err := helperinternal.ParseImageName(conf.ImageName, c.Repo)
 		if err != nil {
 			return fmt.Errorf("invalid image format: %w", err)
 		}

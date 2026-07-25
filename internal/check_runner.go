@@ -40,14 +40,8 @@ func RunCheckCommand(c *components.Context, appName, appVersion string) error {
 		output = "json" // Default to JSON
 	}
 
-	repo := c.GetStringFlagValue("repo")
-	if repo == "" {
-		repo = "docker-local"
-	}
-
 	conf := &CheckConfiguration{
 		ImageName:          c.Arguments[0],
-		Repo:               repo,
 		ServerId:           c.GetStringFlagValue("server-id"),
 		Platform:           c.GetStringFlagValue("platform"),
 		FailOnVuln:         c.GetBoolFlagValue("fail-on-vuln"),
@@ -77,7 +71,7 @@ func RunCheckCommand(c *components.Context, appName, appVersion string) error {
 	}
 
 	// Parse image name to extract repository and tag
-	repoKey, imageName, tag, err := ParseImageName(conf.ImageName, conf.Repo)
+	repoKey, imageName, tag, err := ParseImageName(conf.ImageName, c.GetStringFlagValue("repo"))
 	if err != nil {
 		return fmt.Errorf("invalid image format: %w", err)
 	}
@@ -481,20 +475,20 @@ func ParseImageName(imageName, defaultRepo string) (string, string, string, erro
 		return "", "", "", fmt.Errorf("invalid image format, expected: image:tag")
 	}
 
+	if defaultRepo == "" {
+		defaultRepo = "docker-local"
+	}
+
 	firstSlash := strings.Index(trimmed, "/")
 	firstColon := strings.Index(trimmed, ":")
 
 	var repoKey, imageAndTag string
 	if firstSlash >= 0 && (firstColon < 0 || firstSlash < firstColon) {
 		// Slash appears before any colon → first segment is the repo key.
-		parts := strings.SplitN(trimmed, "/", 2)
-		repoKey = parts[0]
-		imageAndTag = parts[1]
+		repoKey = trimmed[:firstSlash]
+		imageAndTag = trimmed[firstSlash+1:]
 	} else {
 		// No slash, or slash comes after the colon → treat whole string as image:tag.
-		if defaultRepo == "" {
-			return "", "", "", fmt.Errorf("invalid image format, expected: repo/image:tag or specify --repo flag")
-		}
 		repoKey = defaultRepo
 		imageAndTag = trimmed
 	}

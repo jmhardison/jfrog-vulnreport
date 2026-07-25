@@ -52,7 +52,6 @@ type Descriptor struct {
 // Populated from CLI flags in commands/check.go and passed through the call chain.
 type CheckConfiguration struct {
 	ImageName         string // Full image reference (e.g., "docker-local/myimage:latest" or "myimage:latest")
-	Repo              string // Artifactory repository key; used as default when ImageName has no repo prefix
 	ServerId          string // JFrog CLI server configuration ID
 	Platform          string // Platform filter: "os/arch" (e.g., "linux/amd64") or OS only (e.g., "linux")
 	FailOnVuln        bool   // Exit non-zero if any vulnerabilities found
