@@ -3,8 +3,12 @@
 This document describes what happens, in order, when you run:
 
 ```
+jf vulnreport check <image>:<tag> --malicious-watch-name <mw>
+# or
 jf vulnreport check <repo>/<image>:<tag> --malicious-watch-name <mw>
 ```
+
+The `--repo` flag (default: `docker-local`) supplies the Artifactory repository key when the image argument does not include a repo prefix. If the argument already contains a slash before the first colon, its leading segment is used as the repo and `--repo` is ignored.
 
 ---
 
@@ -25,7 +29,11 @@ There are two distinct JFrog systems involved:
 
 **File:** `main.go` → `commands/check.go`
 
-The JFrog CLI framework receives the command and routes it to `checkCmd()`, which reads every flag into a `CheckCommand` struct (image name, server ID, watch names, output format, platform filter, etc.) and calls `Exec()`.
+The JFrog CLI framework receives the command and routes it to `checkCmd()`, which reads every flag into a `CheckCommand` struct (image name, repo, server ID, watch names, output format, platform filter, etc.) and calls `Exec()`.
+
+Before any API calls, `ParseImageName()` resolves the repository key and image path from the argument:
+- `repo/image:tag` — the leading segment before the first slash is the repo key; the remainder is `image:tag`.
+- `image:tag` (no slash before the colon) — the `--repo` flag value is used as the repo key (`docker-local` by default).
 
 `Exec()` has two paths:
 
@@ -227,13 +235,14 @@ If `--fail-on-vuln` is set and `report.TotalIssues > 0`, the command returns a n
 ## Call Stack Summary
 
 ```
-jf vulnreport check <image> [flags]
+jf vulnreport check <image> [--repo <repo>] [flags]
 └── checkCmd()                             commands/check.go
     └── CheckCommand.Exec()                commands/check.go
         └── RunCheckCommand()              internal/check_runner.go
-            ├── getServerDetails()         → JFrog CLI framework (token exchange)
-            ├── newXrayService()           → authenticated Xray HTTP client
-            ├── newArtifactoryService()    → authenticated Artifactory HTTP client
+            ├── ParseImageName(image, repo)  → resolves repoKey / imageName / tag
+            ├── getServerDetails()           → JFrog CLI framework (token exchange)
+            ├── newXrayService()             → authenticated Xray HTTP client
+            ├── newArtifactoryService()      → authenticated Artifactory HTTP client
             └── RunCheckCommandFromConf()  internal/check_runner.go
                 └── generateVulnerabilityReport()
                     ├── discoverImageArtifacts()           internal/docker_paths.go
