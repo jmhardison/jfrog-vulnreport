@@ -40,8 +40,14 @@ func RunCheckCommand(c *components.Context, appName, appVersion string) error {
 		output = "json" // Default to JSON
 	}
 
+	repo := c.GetStringFlagValue("repo")
+	if repo == "" {
+		repo = "docker-local"
+	}
+
 	conf := &CheckConfiguration{
 		ImageName:          c.Arguments[0],
+		Repo:               repo,
 		ServerId:           c.GetStringFlagValue("server-id"),
 		Platform:           c.GetStringFlagValue("platform"),
 		FailOnVuln:         c.GetBoolFlagValue("fail-on-vuln"),
@@ -71,7 +77,7 @@ func RunCheckCommand(c *components.Context, appName, appVersion string) error {
 	}
 
 	// Parse image name to extract repository and tag
-	repoKey, imageName, tag, err := ParseImageName(conf.ImageName)
+	repoKey, imageName, tag, err := ParseImageName(conf.ImageName, conf.Repo)
 	if err != nil {
 		return fmt.Errorf("invalid image format: %w", err)
 	}
@@ -466,24 +472,36 @@ func severityMeetsMin(severity, minSeverity string) bool {
 	return r <= minRank
 }
 
-// ParseImageName splits a full image reference (e.g., "docker-local/myimage:latest") into its
-// repository key, image name, and tag components. Used as the first step in artifact discovery.
-func ParseImageName(imageName string) (string, string, string, error) {
+// ParseImageName splits an image reference into repository key, image name, and tag.
+// Accepts "repo/image:tag" (repo from the argument) or "image:tag" (repo from defaultRepo).
+// When the argument contains a slash before the first colon, the first segment is always the repo.
+func ParseImageName(imageName, defaultRepo string) (string, string, string, error) {
 	trimmed := strings.TrimSpace(imageName)
 	if trimmed == "" {
-		return "", "", "", fmt.Errorf("invalid image format, expected: repo/image:tag")
+		return "", "", "", fmt.Errorf("invalid image format, expected: image:tag")
 	}
 
-	parts := strings.SplitN(trimmed, "/", 2)
-	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
-		return "", "", "", fmt.Errorf("invalid image format, expected: repo/image:tag")
+	firstSlash := strings.Index(trimmed, "/")
+	firstColon := strings.Index(trimmed, ":")
+
+	var repoKey, imageAndTag string
+	if firstSlash >= 0 && (firstColon < 0 || firstSlash < firstColon) {
+		// Slash appears before any colon → first segment is the repo key.
+		parts := strings.SplitN(trimmed, "/", 2)
+		repoKey = parts[0]
+		imageAndTag = parts[1]
+	} else {
+		// No slash, or slash comes after the colon → treat whole string as image:tag.
+		if defaultRepo == "" {
+			return "", "", "", fmt.Errorf("invalid image format, expected: repo/image:tag or specify --repo flag")
+		}
+		repoKey = defaultRepo
+		imageAndTag = trimmed
 	}
 
-	repoKey := parts[0]
-	imageAndTag := parts[1]
 	tagSeparator := strings.LastIndex(imageAndTag, ":")
 	if tagSeparator <= 0 || tagSeparator == len(imageAndTag)-1 {
-		return "", "", "", fmt.Errorf("invalid image format, expected: repo/image:tag")
+		return "", "", "", fmt.Errorf("invalid image format, expected: image:tag")
 	}
 
 	image := imageAndTag[:tagSeparator]

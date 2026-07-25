@@ -21,6 +21,7 @@ func TestParseImageName(t *testing.T) {
 	tests := []struct {
 		name          string
 		fullImageName string
+		defaultRepo   string
 		expectedRepo  string
 		expectedImage string
 		expectedTag   string
@@ -29,39 +30,66 @@ func TestParseImageName(t *testing.T) {
 		{
 			name:          "Valid image with single repository",
 			fullImageName: "docker-local/myapp:latest",
+			defaultRepo:   "",
 			expectedRepo:  "docker-local",
 			expectedImage: "myapp",
 			expectedTag:   "latest",
-			expectError:   false,
 		},
 		{
 			name:          "Valid image with nested path",
 			fullImageName: "docker-local/team/myapp:v1.2.3",
+			defaultRepo:   "",
 			expectedRepo:  "docker-local",
 			expectedImage: "team/myapp",
 			expectedTag:   "v1.2.3",
-			expectError:   false,
+		},
+		{
+			name:          "Image without repo prefix uses defaultRepo",
+			fullImageName: "myapp:latest",
+			defaultRepo:   "docker-local",
+			expectedRepo:  "docker-local",
+			expectedImage: "myapp",
+			expectedTag:   "latest",
+		},
+		{
+			name:          "Image without repo prefix uses custom defaultRepo",
+			fullImageName: "myapp:v2.0",
+			defaultRepo:   "my-repo",
+			expectedRepo:  "my-repo",
+			expectedImage: "myapp",
+			expectedTag:   "v2.0",
+		},
+		{
+			name:          "Repo in image arg overrides defaultRepo",
+			fullImageName: "docker-local/myapp:latest",
+			defaultRepo:   "other-repo",
+			expectedRepo:  "docker-local",
+			expectedImage: "myapp",
+			expectedTag:   "latest",
 		},
 		{
 			name:          "Invalid format - missing tag",
 			fullImageName: "docker-local/myapp",
+			defaultRepo:   "",
 			expectError:   true,
 		},
 		{
-			name:          "Invalid format - missing repository",
+			name:          "Invalid format - no repo and no defaultRepo",
 			fullImageName: "myapp:latest",
+			defaultRepo:   "",
 			expectError:   true,
 		},
 		{
 			name:          "Invalid format - empty string",
 			fullImageName: "",
+			defaultRepo:   "docker-local",
 			expectError:   true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			repo, image, tag, err := ParseImageName(tt.fullImageName)
+			repo, image, tag, err := ParseImageName(tt.fullImageName, tt.defaultRepo)
 
 			if tt.expectError {
 				assert.Error(t, err)

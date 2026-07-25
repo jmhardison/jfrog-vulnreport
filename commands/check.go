@@ -16,7 +16,8 @@ type CheckCommand struct {
 	artSvc  *helperinternal.ArtifactoryService
 
 	// Flag values — set by fluent setters from main.go Action callback.
-	Image            string // Full image reference (e.g., "docker-local/myimage:latest")
+	Image            string // Image reference (e.g., "myimage:latest" or "docker-local/myimage:latest")
+	Repo             string // Artifactory repository key (default: "docker-local")
 	ServerId         string // JFrog CLI server configuration ID
 	Platform         string // Platform filter: "os/arch" (e.g., "linux/amd64") or OS only (e.g., "linux")
 	FailOnVuln       bool   // Exit non-zero if any vulnerabilities found
@@ -52,6 +53,7 @@ func (c *CheckCommand) SetArtifactoryService(svc *helperinternal.ArtifactoryServ
 
 // Fluent setters for flag values — each returns *CheckCommand for chaining.
 func (c *CheckCommand) SetImage(v string) *CheckCommand          { c.Image = v; return c }
+func (c *CheckCommand) SetRepo(v string) *CheckCommand           { c.Repo = v; return c }
 func (c *CheckCommand) SetServerId(v string) *CheckCommand       { c.ServerId = v; return c }
 func (c *CheckCommand) SetPlatform(v string) *CheckCommand       { c.Platform = v; return c }
 func (c *CheckCommand) SetFailOnVuln(v bool) *CheckCommand       { c.FailOnVuln = v; return c }
@@ -82,8 +84,13 @@ func (c *CheckCommand) Exec() error {
 		if projectKey == "" {
 			projectKey = "default"
 		}
+		repo := c.Repo
+		if repo == "" {
+			repo = "docker-local"
+		}
 		conf := &helperinternal.CheckConfiguration{
 			ImageName:          c.Image,
+			Repo:               repo,
 			ServerId:           c.ServerId,
 			Platform:           c.Platform,
 			FailOnVuln:         c.FailOnVuln,
@@ -98,7 +105,7 @@ func (c *CheckCommand) Exec() error {
 			AppName:            c.AppName,
 			AppVersion:         c.AppVersion,
 		}
-		repoKey, imageName, tag, err := helperinternal.ParseImageName(conf.ImageName)
+		repoKey, imageName, tag, err := helperinternal.ParseImageName(conf.ImageName, conf.Repo)
 		if err != nil {
 			return fmt.Errorf("invalid image format: %w", err)
 		}
@@ -107,6 +114,9 @@ func (c *CheckCommand) Exec() error {
 
 	// Normal CLI path: build a components.Context and delegate to RunCheckCommand.
 	ctx := &components.Context{Arguments: []string{c.Image}}
+	if c.Repo != "" {
+		ctx.AddStringFlag("repo", c.Repo)
+	}
 	if c.ServerId != "" {
 		ctx.AddStringFlag("server-id", c.ServerId)
 	}
@@ -164,6 +174,7 @@ func checkCmd(c *components.Context, appName, appVersion string) error {
 
 	cmd := NewCheckCommand().
 		SetImage(c.Arguments[0]).
+		SetRepo(c.GetStringFlagValue("repo")).
 		SetServerId(c.GetStringFlagValue("server-id")).
 		SetPlatform(c.GetStringFlagValue("platform")).
 		SetFailOnVuln(c.GetBoolFlagValue("fail-on-vuln")).
@@ -184,13 +195,17 @@ func getCheckArguments() []components.Argument {
 	return []components.Argument{
 		{
 			Name:        "image",
-			Description: "The Docker image name and tag (e.g., myrepo/myimage:tag).",
+			Description: "The Docker image name and tag (e.g., myimage:tag or repo/myimage:tag). If the repo is omitted, --repo is used.",
 		},
 	}
 }
 
 func getCheckFlags() []components.Flag {
 	return []components.Flag{
+		components.NewStringFlag(
+			"repo",
+			"Artifactory repository key containing the Docker image. Defaults to 'docker-local'.",
+		),
 		components.NewStringFlag(
 			"server-id",
 			"JFrog server configuration ID to use.",
