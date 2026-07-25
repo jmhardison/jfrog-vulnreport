@@ -354,7 +354,7 @@ func (xs *XrayService) GetViolations(watchName, repo, path, projectKey string) (
 			return nil, fmt.Errorf("failed to marshal violations request: %w", err)
 		}
 
-		log.Info(fmt.Sprintf("[XrayService] POST /api/v1/violations url=%s repo=%s path=%s watch=%s offset=%d",
+		log.Debug(fmt.Sprintf("[XrayService] POST /api/v1/violations url=%s repo=%s path=%s watch=%s offset=%d",
 			apiURL, repo, path, watchName, offset))
 
 		resp, respBody, err := xs.client.SendPost(apiURL, body, &httpDetails)
@@ -362,7 +362,7 @@ func (xs *XrayService) GetViolations(watchName, repo, path, projectKey string) (
 			return nil, fmt.Errorf("POST /api/v1/violations failed: %w", err)
 		}
 
-		log.Info(fmt.Sprintf("[XrayService] resp status=%d body_len=%d", resp.StatusCode, len(respBody)))
+		log.Debug(fmt.Sprintf("[XrayService] resp status=%d body_len=%d", resp.StatusCode, len(respBody)))
 
 		if resp.StatusCode != http.StatusOK {
 			return nil, fmt.Errorf("xray returned status %d: %s", resp.StatusCode, string(respBody))

@@ -1,5 +1,12 @@
 # Release Notes
 
+## v0.1.10
+
+- feat: add `table` output format (Unicode box-drawing tables) as the new default — `--output json` now required to get JSON output when not specified
+- feat: replace `--debug-paths` flag with `--debug` — enables DEBUG-level logging for troubleshooting artifact discovery
+- feat: default log level changed from INFO to WARN for `table` and `json` output — operational progress messages no longer appear unless `--debug` is set
+- feat: ANSI severity colors in `table` output (Critical/Malicious=red, High=yellow, Medium=cyan) — omitted automatically when stdout is not a TTY
+
 ## v0.1.9
 
 - fix: update from badgeio to baked png images.

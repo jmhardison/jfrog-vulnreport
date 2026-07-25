@@ -29,7 +29,7 @@ type rtArtifact struct {
 func discoverImageArtifacts(artSvc *ArtifactoryService, repoKey, imageName, tag string) ([]dockerPath, error) {
 	// Step 1: Search Artifactory for Docker image files (manifests and blobs)
 	searchPattern := fmt.Sprintf("%s/%s/%s/*", repoKey, imageName, tag)
-	log.Info(fmt.Sprintf("Searching Artifactory for Docker artifacts: %s", searchPattern))
+	log.Debug(fmt.Sprintf("Searching Artifactory for Docker artifacts: %s", searchPattern))
 
 	artifacts, err := artSvc.SearchArtifacts(searchPattern)
 	if err != nil {
@@ -51,7 +51,7 @@ func discoverImageArtifacts(artSvc *ArtifactoryService, repoKey, imageName, tag 
 		isManifest := strings.HasSuffix(path, "/manifest.json") && !isListManifest
 
 		if isListManifest || isManifest {
-			log.Info(fmt.Sprintf("Found %s in Artifactory", path))
+			log.Debug(fmt.Sprintf("Found %s in Artifactory", path))
 
 			// Extract sha256 from path or properties
 			digest := extractSHA256FromPathOrProps(art)
@@ -64,7 +64,7 @@ func discoverImageArtifacts(artSvc *ArtifactoryService, repoKey, imageName, tag 
 
 			if isListManifest {
 				listManifestArt = &art // Remember the list manifest for later expansion
-				log.Info("Multi-platform image detected via list.manifest.json")
+				log.Debug("Multi-platform image detected via list.manifest.json")
 			} else {
 				singlePlatformPaths = append(singlePlatformPaths, dockerPath{
 					path:    path,
@@ -94,7 +94,7 @@ func discoverImageArtifacts(artSvc *ArtifactoryService, repoKey, imageName, tag 
 
 	// Single-platform image (or no list manifest found)
 	if len(singlePlatformPaths) > 0 {
-		log.Info("Single-platform image detected via manifest.json")
+		log.Debug("Single-platform image detected via manifest.json")
 	} else {
 		log.Debug("No manifest files found in Artifactory search results")
 	}
@@ -129,7 +129,7 @@ func expandListManifest(artSvc *ArtifactoryService, listArt *rtArtifact, repoKey
 		return nil, nil
 	}
 
-	log.Info(fmt.Sprintf("Expanding list.manifest.json into %d platform entries", len(listManifest.Manifests)))
+	log.Debug(fmt.Sprintf("Expanding list.manifest.json into %d platform entries", len(listManifest.Manifests)))
 
 	var paths []dockerPath
 	for _, entry := range listManifest.Manifests {

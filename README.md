@@ -59,14 +59,14 @@ jf vulnreport check <repo/image:tag> [flags]
 | `--malicious-watch-name` | Yes | — | Xray watch name used as the authoritative source for malicious package detection |
 | `--repo` | No | `docker-local` | Artifactory repository key containing the Docker image. Used when the image argument does not include a repository prefix. |
 | `--server-id` | No | default server | JFrog CLI server configuration ID |
-| `--output` | No | `json` | Output format: `json` or `github-md` |
+| `--output` | No | `table` | Output format: `table`, `json`, or `github-md` |
 | `--min-severity` | No | — | Minimum severity to include in findings: `Low`, `Medium`, `High`, `Critical`, `Malicious` |
 | `--platform` | No | all platforms | Filter by platform — `os/arch` (e.g., `linux/amd64`) or OS only (e.g., `linux`) |
 | `--fail-on-vuln` | No | `false` | Exit non-zero if any vulnerabilities are found |
 | `--no-findings` | No | `false` | Suppress the Security Findings detail table (summary counts and malicious findings still shown) |
 | `--project-key` | No | `default` | Xray project key for violation queries — only needed when the watch is scoped to a JFrog project |
 | `--docker-registry-url` | No | derived from server | Override the Docker registry base URL |
-| `--debug-paths` | No | `false` | Log artifact discovery paths for troubleshooting |
+| `--debug` | No | `false` | Enable debug-level logging for troubleshooting |
 
 **Examples**
 
@@ -103,7 +103,20 @@ jf vulnreport check team/myapp:1.2.3 \
 
 ## Output Formats
 
-### `json` (default)
+### `table` (default)
+
+CLI-friendly Unicode box-drawing tables rendered to stdout. Sections:
+
+- Header with image name and link to the JFrog Platform manifest view
+- Status line indicating the highest-severity state (malicious / critical / CVEs / clean)
+- **Security Summary** table — total, critical, high, medium, low, fixable, malicious, platform count
+- **Malicious Findings** table — listed when malicious packages are detected
+- **Security Findings** table — one row per issue with XRAY-ID, severity, JFrog Research severity, fixable, and platforms. Filtered by `--min-severity`. Suppressed with `--no-findings`.
+- Footer with version and timestamp
+
+ANSI colors are applied automatically when stdout is a TTY (red for Critical/Malicious, yellow for High, cyan for Medium). Colors are omitted when piping to a file or another command.
+
+### `json`
 
 Structured JSON including image metadata, severity counts, platform list, malicious issue IDs, and a full findings array. Suitable for downstream tooling and audit pipelines.
 

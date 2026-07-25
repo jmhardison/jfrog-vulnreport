@@ -42,7 +42,8 @@ go build -o vulnreport . && jf plugin install vulnreport  # Install as JFrog CLI
 ## Architecture Notes
 
 - **Single command**: `check` — no subcommands planned
-- **Output formats**: `json` (default, enhanced report with image metadata/counts), `github-md` (GitHub-flavored markdown with alert banners for CI pipelines)
+- **Output formats**: `table` (default, CLI-friendly Unicode box tables), `json` (structured JSON report), `github-md` (GitHub-flavored markdown with alert banners for CI pipelines)
+- **Log levels**: DEBUG when `--debug` is set, WARN by default (table/json), ERROR for `github-md` (suppresses all non-error output so only markdown reaches stdout)
 - Image tag input → AQL search → manifest discovery → Violations API (malicious watch) → v2 summary API (counts + fixable) → formatted report
 
 ### Code Organization & File Responsibilities
@@ -52,7 +53,7 @@ go build -o vulnreport . && jf plugin install vulnreport  # Install as JFrog CLI
 **CLI command**: `commands/check.go` — `CheckCommand` struct with fluent setters for all flags. `GetCheckCommand()` registers the CLI command; `checkCmd()` reads framework flags into `CheckCommand` fields and calls `Exec()`. Any new flag must be registered in both `getCheckFlags()` and `Exec()`.
 
 **Internal logic**: `/internal/` package contains business logic split across five files:
-- `check_runner.go` — main command implementation; `RunCheckCommand` orchestrates auth, service creation, and report generation. `generateVulnerabilityReport` handles dual-path discovery, Violations API queries for all platforms (no early break), malicious lookup map construction, and severity aggregation. Output formatters: `outputJSONReport`, `outputMarkdownReport` (emits GitHub alert banners via `generateSecurityBanner`).
+- `check_runner.go` — main command implementation; `RunCheckCommand` orchestrates auth, service creation, and report generation. `generateVulnerabilityReport` handles dual-path discovery, Violations API queries for all platforms (no early break), malicious lookup map construction, and severity aggregation. Output formatters: `outputTableReport` (Unicode box tables, default), `outputJSONReport`, `outputMarkdownReport` (emits GitHub alert banners via `generateSecurityBanner`). `setLogLevel()` sets the JFrog SDK logger: DEBUG (`--debug`), WARN (default for table/json), ERROR (`github-md`).
 - `models.go` — Go types matching Xray/Artifactory JSON payloads (`DockerManifest`, `ManifestList`, `VulnerabilityReport`, `EnhancedVulnerabilityReport`, `CompactFinding`).
 - `helpers.go` — pure utilities: `GetDigestPaths`, `extractRepoFromPath`, `IsValidManifestContent`.
 - `docker_paths.go` — Docker image path discovery. `discoverImageArtifacts` uses AQL search via `ArtifactoryService`; `expandListManifest` builds per-platform paths as `<repo>/<image>/<tag>/sha256__<digest>/manifest.json`; `FilterManifestsByPlatform` filters by os/arch.
@@ -74,7 +75,7 @@ go build -o vulnreport . && jf plugin install vulnreport  # Install as JFrog CLI
 **Descriptor format** (submit to jfrog-cli-plugins-reg, not stored here):
 ```yaml
 pluginName: vulnreport
-version: v0.1.7
+version: v0.1.9
 repository: https://github.com/jmhardison/jfrog-vulnreport
 maintainers:
   - jmhardison
@@ -214,3 +215,5 @@ The `--project-key` flag is passed in the Violations API query URL (`?projectKey
 14. **Four-tier GitHub MD banner** — `generateSecurityBanner` renders [!CAUTION] red for malicious content (highest priority), [!CAUTION] orange for critical CVEs with no malicious, [!WARNING] yellow for non-critical CVEs, and [!NOTE] green for clean. Banner tier is determined from pre-counted report fields (`MaliciousIssues`, `CriticalCount`, `TotalIssues`) — not from `--min-severity`.
 15. **`SummaryIssue.Platforms` carries per-finding attribution** — `GetSummaryV2` accepts a `labels []string` parallel to `paths []string`. For multi-platform images, each finding accumulates the labels from every artifact where it appeared. If `labels` is nil (fallback call with list.manifest.json), all platform labels from the original per-platform query are applied to every finding.
 16. **Multi-platform v2 fallback** — if a per-platform sha256__ v2 query returns total=0 (Xray may not index sub-paths separately), `generateVulnerabilityReport` retries with the top-level `list.manifest.json` path and `labels=nil`, then bulk-assigns all platform labels to every returned finding.
+17. **`table` is the default output format** — changed from `json`. Any pipeline that relied on stdout being JSON by default must now pass `--output json` explicitly.
+18. **`--debug` flag replaces `--debug-paths`** — enables DEBUG-level SDK logging for troubleshooting artifact discovery. The old `--debug-paths` flag no longer exists; update any scripts that reference it.

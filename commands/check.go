@@ -23,7 +23,7 @@ type CheckCommand struct {
 	FailOnVuln       bool   // Exit non-zero if any vulnerabilities found
 	Output           string // Output format: "json" or "github-md"
 	MinSeverity      string // Minimum severity to display: Low, Medium, High, Critical, Malicious
-	DebugPaths       bool   // Log artifact discovery paths for troubleshooting
+	Debug            bool   // Enable debug-level logging
 	DockerRegistryURL string // Override URL for Docker registry (for direct manifest fetch)
 	ProjectKey       string // Xray project key for violation queries (defaults to "default")
 	MaliciousWatchName string // Xray watch that defines malicious packages (source of truth)
@@ -59,7 +59,7 @@ func (c *CheckCommand) SetPlatform(v string) *CheckCommand       { c.Platform = 
 func (c *CheckCommand) SetFailOnVuln(v bool) *CheckCommand       { c.FailOnVuln = v; return c }
 func (c *CheckCommand) SetOutput(v string) *CheckCommand         { c.Output = v; return c }
 func (c *CheckCommand) SetMinSeverity(v string) *CheckCommand    { c.MinSeverity = v; return c }
-func (c *CheckCommand) SetDebugPaths(v bool) *CheckCommand       { c.DebugPaths = v; return c }
+func (c *CheckCommand) SetDebug(v bool) *CheckCommand            { c.Debug = v; return c }
 func (c *CheckCommand) SetDockerRegistryURL(v string) *CheckCommand { c.DockerRegistryURL = v; return c }
 func (c *CheckCommand) SetProjectKey(v string) *CheckCommand     { c.ProjectKey = v; return c }
 func (c *CheckCommand) SetMaliciousWatchName(v string) *CheckCommand { c.MaliciousWatchName = v; return c }
@@ -78,7 +78,7 @@ func (c *CheckCommand) Exec() error {
 		}
 		output := c.Output
 		if output == "" {
-			output = "json"
+			output = "table"
 		}
 		projectKey := c.ProjectKey
 		if projectKey == "" {
@@ -92,7 +92,7 @@ func (c *CheckCommand) Exec() error {
 			Output:             output,
 			Silent:             output == "github-md",
 			MinSeverity:        c.MinSeverity,
-			DebugPaths:         c.DebugPaths,
+			Debug:              c.Debug,
 			DockerRegistryURL:  c.DockerRegistryURL,
 			ProjectKey:         projectKey,
 			MaliciousWatchName: c.MaliciousWatchName,
@@ -125,7 +125,7 @@ func (c *CheckCommand) Exec() error {
 	if c.MinSeverity != "" {
 		ctx.AddStringFlag("min-severity", c.MinSeverity)
 	}
-	ctx.AddBoolFlag("debug-paths", c.DebugPaths)
+	ctx.AddBoolFlag("debug", c.Debug)
 	if c.DockerRegistryURL != "" {
 		ctx.AddStringFlag("docker-registry-url", c.DockerRegistryURL)
 	}
@@ -164,7 +164,7 @@ func checkCmd(c *components.Context, appName, appVersion string) error {
 
 	output := c.GetStringFlagValue("output")
 	if output == "" {
-		output = "json" // Default to JSON
+		output = "table"
 	}
 
 	cmd := NewCheckCommand().
@@ -175,7 +175,7 @@ func checkCmd(c *components.Context, appName, appVersion string) error {
 		SetFailOnVuln(c.GetBoolFlagValue("fail-on-vuln")).
 		SetOutput(output).
 		SetMinSeverity(c.GetStringFlagValue("min-severity")).
-		SetDebugPaths(c.GetBoolFlagValue("debug-paths")).
+		SetDebug(c.GetBoolFlagValue("debug")).
 		SetDockerRegistryURL(c.GetStringFlagValue("docker-registry-url")).
 		SetProjectKey(c.GetStringFlagValue("project-key")).
 		SetMaliciousWatchName(c.GetStringFlagValue("malicious-watch-name")).
@@ -216,15 +216,15 @@ func getCheckFlags() []components.Flag {
 		),
 		components.NewStringFlag(
 			"output",
-			"Output format: json (default), github-md (silent markdown for GitHub).",
+			"Output format: table (default), json, github-md (silent markdown for CI).",
 		),
 		components.NewStringFlag(
 			"min-severity",
 			"Minimum severity level to display in findings (Low, Medium, High, Critical, Malicious). Summary shows all severities.",
 		),
 		components.NewBoolFlag(
-			"debug-paths",
-			"Enable debug mode to explore repository structure.",
+			"debug",
+			"Enable debug-level logging for troubleshooting.",
 			components.WithBoolDefaultValue(false),
 		),
 		components.NewStringFlag(

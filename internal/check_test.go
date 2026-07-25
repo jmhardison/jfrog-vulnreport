@@ -324,7 +324,7 @@ func TestGithubMDOutputNoLogLeakage(t *testing.T) {
 	output := buf.String()
 
 	// Every line must be markdown or blank — no log timestamp prefix.
-	for _, line := range strings.Split(output, "\n") {
+	for line := range strings.SplitSeq(output, "\n") {
 		if line == "" {
 			continue
 		}
@@ -332,6 +332,148 @@ func TestGithubMDOutputNoLogLeakage(t *testing.T) {
 		assert.NotRegexp(t, `^\d{2}:\d{2}:\d{2}`, line,
 			"log line leaked into github-md stdout: %q", line)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// End-to-end pipeline smoke tests — JSON and github-md output paths
+// ---------------------------------------------------------------------------
+
+// endToEndMockServer creates a test HTTP server that handles all three API endpoints
+// (Artifactory AQL, Xray v1 violations, Xray v2 summary) with realistic responses.
+// Returns one single-platform image (linux/amd64) with one malicious Critical finding
+// (XRAY-MAL-1) and one High+fixable finding (XRAY-CVE-1, JFrog research: Medium).
+func endToEndMockServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.Contains(r.URL.Path, "search/aql"):
+			_, _ = io.WriteString(w, `{"results":[{"repo":"docker-local","path":"myapp/v1","name":"manifest.json","sha256":"abc123def456","properties":[{"key":"docker.os","value":"linux"},{"key":"docker.architecture","value":"amd64"}]}]}`)
+		case strings.Contains(r.URL.Path, "v1/violations"):
+			_, _ = io.WriteString(w, `{"total_violations":1,"violations":[{"violation_id":"V-001","issue_id":"XRAY-MAL-1","severity":"Critical","malicious_package":true}]}`)
+		case strings.Contains(r.URL.Path, "v2/summary/artifact"):
+			_, _ = io.WriteString(w, `{"artifacts":[{"issues":[{"issue_id":"XRAY-MAL-1","severity":"Critical","extended_information":{"jfrog_research_severity":"Critical"},"components":[{"fixed_versions":[]}]},{"issue_id":"XRAY-CVE-1","severity":"High","extended_information":{"jfrog_research_severity":"Medium"},"components":[{"fixed_versions":["2.0.0"]}]}]}]}`)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// endToEndServices creates XrayService and ArtifactoryService pointing at the given test server.
+func endToEndServices(t *testing.T, srv *httptest.Server) (*XrayService, *ArtifactoryService) {
+	t.Helper()
+	client, err := jfroghttpclient.JfrogClientBuilder().Build()
+	require.NoError(t, err)
+	artDetails := artAuth.NewArtifactoryDetails()
+	artDetails.SetUrl(srv.URL + "/")
+	xrayDetails := xrayAuth.NewXrayDetails()
+	xrayDetails.SetUrl(srv.URL + "/")
+	return NewXrayService(client, xrayDetails), NewArtifactoryService(client, artDetails)
+}
+
+func TestRunCheckCommandPipeline_JSONOutput(t *testing.T) {
+	srv := endToEndMockServer(t)
+	xraySvc, artSvc := endToEndServices(t, srv)
+
+	conf := &CheckConfiguration{
+		ImageName:          "docker-local/myapp:v1",
+		Output:             "json",
+		MaliciousWatchName: "test-watch",
+		ProjectKey:         "default",
+		AppName:            "vulnreport",
+		AppVersion:         "vtest",
+	}
+
+	out := captureStdout(t, func() {
+		err := RunCheckCommandFromConf(conf, "docker-local", "myapp", "v1", srv.URL, xraySvc, artSvc)
+		assert.NoError(t, err)
+	})
+
+	var report EnhancedVulnerabilityReport
+	require.NoError(t, json.Unmarshal([]byte(out), &report), "JSON output must parse cleanly")
+
+	assert.Equal(t, "docker-local/myapp:v1", report.ImageName)
+	assert.False(t, report.ImageNotFound)
+	assert.Equal(t, 2, report.Summary.TotalFindings)
+	assert.Equal(t, 1, report.Summary.CriticalCount)
+	assert.Equal(t, 1, report.Summary.HighCount)
+	assert.Equal(t, 1, report.Summary.FixableCount)
+	assert.Equal(t, 1, report.Summary.MaliciousCount)
+	assert.Equal(t, 1, report.Summary.PlatformCount)
+	assert.Equal(t, []string{"XRAY-MAL-1"}, report.MaliciousIssues)
+
+	require.Len(t, report.Platforms, 1)
+	assert.Equal(t, "linux", report.Platforms[0].Platform.OS)
+	assert.Equal(t, "amd64", report.Platforms[0].Platform.Architecture)
+
+	require.Len(t, report.Findings, 2)
+	// Critical sorts first; XRAY-MAL-1 is malicious+critical, not fixable.
+	assert.Equal(t, "XRAY-MAL-1", report.Findings[0].IssueID)
+	assert.Equal(t, "Critical", report.Findings[0].Severity)
+	assert.Equal(t, "Critical", report.Findings[0].JFrogSeverity)
+	assert.True(t, report.Findings[0].Malicious)
+	assert.False(t, report.Findings[0].Fixable)
+	// High+fixable; JFrog research rates it Medium.
+	assert.Equal(t, "XRAY-CVE-1", report.Findings[1].IssueID)
+	assert.Equal(t, "High", report.Findings[1].Severity)
+	assert.Equal(t, "Medium", report.Findings[1].JFrogSeverity)
+	assert.False(t, report.Findings[1].Malicious)
+	assert.True(t, report.Findings[1].Fixable)
+}
+
+func TestRunCheckCommandPipeline_GithubMDOutput(t *testing.T) {
+	srv := endToEndMockServer(t)
+	xraySvc, artSvc := endToEndServices(t, srv)
+
+	conf := &CheckConfiguration{
+		ImageName:          "docker-local/myapp:v1",
+		Output:             "github-md",
+		Silent:             true,
+		MaliciousWatchName: "test-watch",
+		ProjectKey:         "default",
+		AppName:            "vulnreport",
+		AppVersion:         "vtest",
+	}
+
+	out := captureStdout(t, func() {
+		err := RunCheckCommandFromConf(conf, "docker-local", "myapp", "v1", srv.URL, xraySvc, artSvc)
+		assert.NoError(t, err)
+	})
+
+	// Banner: malicious takes highest priority over all other states.
+	assert.Contains(t, out, "badge-malicious.png")
+	assert.Contains(t, out, "[!CAUTION]")
+	assert.Contains(t, out, "MALICIOUS EXPLOIT PRESENT")
+
+	// Security Summary section with all counts populated.
+	assert.Contains(t, out, "## Security Summary")
+	assert.Contains(t, out, "**Total Findings:** 2")
+	assert.Contains(t, out, "**Critical:** 1")
+	assert.Contains(t, out, "**High:** 1")
+	assert.Contains(t, out, "**Malicious:** 1")
+	assert.Contains(t, out, "linux/amd64")
+
+	// Malicious findings table with the XRAY ID from the violations watch.
+	assert.Contains(t, out, "Malicious Findings (1)")
+	assert.Contains(t, out, "XRAY-MAL-1")
+
+	// Security findings table with fixable count and both findings.
+	assert.Contains(t, out, "1 fixable")
+	assert.Contains(t, out, "XRAY-CVE-1")
+
+	// No log-line leakage (github-md sets log level to ERROR).
+	for line := range strings.SplitSeq(out, "\n") {
+		if line == "" {
+			continue
+		}
+		assert.NotRegexp(t, `^\d{2}:\d{2}:\d{2}`, line,
+			"log line leaked into github-md stdout: %q", line)
+	}
+
+	// Footer
+	assert.Contains(t, out, "Generated by vulnreport vtest")
 }
 
 func TestViolationWithMaliciousExtractsFromResponse(t *testing.T) {
@@ -519,6 +661,10 @@ func TestOutputJSONReport_WithCounts(t *testing.T) {
 		Platforms: []PlatformVulnerabilityInfo{
 			{Platform: Platform{OS: "linux", Architecture: "amd64"}},
 		},
+		SummaryIssues: []SummaryIssue{
+			{IssueID: "XRAY-10", Severity: "Critical", Fixable: true, Platforms: []string{"linux/amd64"}},
+			{IssueID: "XRAY-20", Severity: "High", Fixable: false, Platforms: []string{"linux/amd64"}},
+		},
 	}
 	lookup := map[string]bool{"XRAY-1": true}
 	out := captureStdout(t, func() {
@@ -531,12 +677,16 @@ func TestOutputJSONReport_WithCounts(t *testing.T) {
 	assert.Equal(t, 7, enhanced.Summary.TotalFindings)
 	assert.Equal(t, 2, enhanced.Summary.CriticalCount)
 	assert.Equal(t, 5, enhanced.Summary.HighCount)
+	assert.Equal(t, 1, enhanced.Summary.FixableCount)
 	assert.Equal(t, 1, enhanced.Summary.MaliciousCount) // from map size
 	assert.Equal(t, 1, enhanced.Summary.PlatformCount)
+	require.Len(t, enhanced.Findings, 2)
+	assert.Equal(t, "XRAY-10", enhanced.Findings[0].IssueID) // Critical sorts first
+	assert.True(t, enhanced.Findings[0].Fixable)
 }
 
 func TestOutputJSONReport_MaliciousCountFromMap(t *testing.T) {
-	// maliciousCount in JSON comes from len(maliciousLookup), NOT len(MaliciousIssues).
+	// MaliciousCount in summary comes from len(maliciousLookup); MaliciousIssues from report.MaliciousIssues.
 	report := &VulnerabilityReport{
 		ImageName:       "docker-local/app:v1",
 		GeneratedAt:     "2026-01-01T00:00:00Z",
@@ -550,7 +700,49 @@ func TestOutputJSONReport_MaliciousCountFromMap(t *testing.T) {
 
 	var enhanced EnhancedVulnerabilityReport
 	require.NoError(t, json.Unmarshal([]byte(out), &enhanced))
-	assert.Equal(t, 3, enhanced.Summary.MaliciousCount) // map has 3 keys
+	assert.Equal(t, 3, enhanced.Summary.MaliciousCount)        // map has 3 keys
+	assert.Equal(t, []string{"A", "B"}, enhanced.MaliciousIssues) // from report.MaliciousIssues
+}
+
+func TestOutputJSONReport_FindingsFromSummaryIssues(t *testing.T) {
+	report := &VulnerabilityReport{
+		ImageName:   "docker-local/app:v1",
+		GeneratedAt: "2026-01-01T00:00:00Z",
+		SummaryIssues: []SummaryIssue{
+			// High severity listed first — should sort second after Critical
+			{IssueID: "XRAY-99", Severity: "High", JFrogSeverity: "Critical", Fixable: false, Platforms: []string{"linux/amd64"}},
+			// Critical — should sort first
+			{IssueID: "XRAY-01", Severity: "Critical", JFrogSeverity: "Critical", Fixable: true, Platforms: []string{"linux/amd64", "linux/arm64"}},
+		},
+		MaliciousIssues: []string{"XRAY-99"},
+	}
+	lookup := map[string]bool{"XRAY-99": true}
+	out := captureStdout(t, func() {
+		err := outputJSONReport(report, lookup)
+		assert.NoError(t, err)
+	})
+
+	var enhanced EnhancedVulnerabilityReport
+	require.NoError(t, json.Unmarshal([]byte(out), &enhanced))
+
+	assert.Equal(t, []string{"XRAY-99"}, enhanced.MaliciousIssues)
+	assert.Equal(t, 1, enhanced.Summary.FixableCount)
+	assert.Equal(t, 1, enhanced.Summary.MaliciousCount)
+	require.Len(t, enhanced.Findings, 2)
+
+	critical := enhanced.Findings[0]
+	assert.Equal(t, "XRAY-01", critical.IssueID)
+	assert.Equal(t, "Critical", critical.Severity)
+	assert.Equal(t, "Critical", critical.JFrogSeverity)
+	assert.True(t, critical.Fixable)
+	assert.False(t, critical.Malicious)
+	assert.Equal(t, []string{"linux/amd64", "linux/arm64"}, critical.Platforms)
+
+	high := enhanced.Findings[1]
+	assert.Equal(t, "XRAY-99", high.IssueID)
+	assert.Equal(t, "High", high.Severity)
+	assert.True(t, high.Malicious)
+	assert.False(t, high.Fixable)
 }
 
 // ---------------------------------------------------------------------------
@@ -702,4 +894,84 @@ func TestOutputReport_UnsupportedFormat(t *testing.T) {
 	err := outputReport(report, map[string]bool{}, "xml", "", "", false, "vulnreport", "vtest")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unsupported output format")
+}
+
+func TestOutputTableReport_ImageNotFound(t *testing.T) {
+	report := &VulnerabilityReport{
+		ImageName:     "docker-local/missing:v1",
+		GeneratedAt:   "2026-01-01T00:00:00Z",
+		ImageNotFound: true,
+	}
+	out := captureStdout(t, func() {
+		err := outputTableReport(report, map[string]bool{}, "", "", false, "vulnreport", "vtest")
+		require.NoError(t, err)
+	})
+	assert.Contains(t, out, "docker-local/missing:v1")
+	assert.Contains(t, out, "No Image Found")
+	assert.Contains(t, out, "vulnreport vtest")
+}
+
+func TestOutputTableReport_Clean(t *testing.T) {
+	report := &VulnerabilityReport{
+		ImageName:   "docker-local/clean:v1",
+		GeneratedAt: "2026-01-01T00:00:00Z",
+		Platforms:   []PlatformVulnerabilityInfo{{Platform: Platform{OS: "linux", Architecture: "amd64"}}},
+	}
+	out := captureStdout(t, func() {
+		err := outputTableReport(report, map[string]bool{}, "https://example.com/manifest", "", false, "vulnreport", "vtest")
+		require.NoError(t, err)
+	})
+	assert.Contains(t, out, "docker-local/clean:v1")
+	assert.Contains(t, out, "https://example.com/manifest")
+	assert.Contains(t, out, "NO FINDINGS")
+	assert.Contains(t, out, "Total Findings")
+	assert.Contains(t, out, "vulnreport vtest")
+}
+
+func TestOutputTableReport_WithFindings(t *testing.T) {
+	report := &VulnerabilityReport{
+		ImageName:     "docker-local/app:v1",
+		GeneratedAt:   "2026-01-01T00:00:00Z",
+		TotalIssues:   2,
+		CriticalCount: 1,
+		HighCount:     1,
+		Platforms:     []PlatformVulnerabilityInfo{{Platform: Platform{OS: "linux", Architecture: "amd64"}}},
+		SummaryIssues: []SummaryIssue{
+			{IssueID: "XRAY-999", Severity: "Critical", Fixable: true, Platforms: []string{"linux/amd64"}},
+			{IssueID: "XRAY-888", Severity: "High", Fixable: false, Platforms: []string{"linux/amd64"}},
+		},
+	}
+	out := captureStdout(t, func() {
+		err := outputTableReport(report, map[string]bool{}, "", "", false, "vulnreport", "vtest")
+		require.NoError(t, err)
+	})
+	assert.Contains(t, out, "CRITICAL CVEs PRESENT")
+	assert.Contains(t, out, "Security Findings (2 | 1 fixable)")
+	assert.Contains(t, out, "XRAY-999")
+	assert.Contains(t, out, "XRAY-888")
+	assert.Contains(t, out, "Critical")
+	assert.Contains(t, out, "High")
+}
+
+func TestOutputTableReport_Malicious(t *testing.T) {
+	report := &VulnerabilityReport{
+		ImageName:       "docker-local/bad:v1",
+		GeneratedAt:     "2026-01-01T00:00:00Z",
+		TotalIssues:     1,
+		CriticalCount:   1,
+		MaliciousIssues: []string{"XRAY-666"},
+		Platforms:       []PlatformVulnerabilityInfo{{Platform: Platform{OS: "linux", Architecture: "amd64"}}},
+		SummaryIssues: []SummaryIssue{
+			{IssueID: "XRAY-666", Severity: "Critical", Fixable: false, Platforms: []string{"linux/amd64"}},
+		},
+	}
+	lookup := map[string]bool{"XRAY-666": true}
+	out := captureStdout(t, func() {
+		err := outputTableReport(report, lookup, "", "", false, "vulnreport", "vtest")
+		require.NoError(t, err)
+	})
+	assert.Contains(t, out, "MALICIOUS EXPLOIT PRESENT")
+	assert.Contains(t, out, "Malicious Findings (1)")
+	assert.Contains(t, out, "XRAY-666")
+	assert.Contains(t, out, "Security Findings")
 }

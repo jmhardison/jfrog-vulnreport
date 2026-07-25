@@ -140,7 +140,7 @@ The response is paginated. All pages are fetched until `total_violations` is rea
 
 Every `issue_id` returned by this watch is stored in a `maliciousLookup` map (`map[string]bool`). This map is the authoritative source of truth for which issues are malicious — the Violations API's own `malicious_package` field is considered unreliable, so this dedicated watch approach is used instead.
 
-This query runs unconditionally regardless of whether `--watch-name` was provided.
+This query runs unconditionally for every image.
 
 ---
 
@@ -197,16 +197,29 @@ If the v2 API call fails, a warning is logged and all counts default to zero. No
 
 **File:** `internal/check_runner.go` — `outputReport()`
 
-After `generateVulnerabilityReport()` returns, a UI manifest link is constructed (pointing to the image in the JFrog Platform web UI), then the report is formatted.
+After `generateVulnerabilityReport()` returns, a UI manifest link is constructed (pointing to the image in the JFrog Platform web UI), then the report is formatted. `setLogLevel()` is called before any output: DEBUG when `--debug` is set, WARN by default (table/json), ERROR for `github-md`.
+
+### Table output (`--output table`, default)
+
+`outputTableReport()` renders Unicode box-drawing tables to stdout using `github.com/jedib0t/go-pretty/v6/table` with `table.StyleLight`. Sections in order:
+1. Header — image name and manifest link
+2. Status line — highest-severity state (malicious → critical → CVEs → clean)
+3. Security Summary table — two-column key/value table with total, critical, high, medium, low, fixable, malicious, and platform count
+4. Malicious Findings table — XRAY-ID + severity, only when `MaliciousIssues` is non-empty
+5. Security Findings table — XRAY-ID, severity, JFrog severity, fixable, platforms; filtered by `--min-severity`; omitted when `--no-findings` is set
+6. Footer — version and timestamp
+
+ANSI severity colors are applied when stdout is a TTY (detected via `golang.org/x/term.IsTerminal`). Colors are omitted when output is piped.
 
 ### JSON output (`--output json`)
 
-`outputJSONReport()` calls `convertToEnhancedReport()` which:
-- Flattens all per-platform vulnerabilities into a single list (always empty — Vulnerabilities is nil after Phase 5 removal)
-- Counts issue types and malicious findings using `maliciousLookup`
-- Produces summary counts from the Phase 4 summary API
+`outputJSONReport()` calls `convertToEnhancedReport()` which builds an `EnhancedVulnerabilityReport` with:
+- `summary` — aggregate counts (total, critical/high/medium/low, fixable, malicious, platform count); fixable count comes from `SummaryIssue.Fixable` across all findings
+- `maliciousIssues` — list of XRAY IDs returned by the malicious watch (omitted when empty)
+- `platforms` — list of platform OS/arch objects discovered for the image
+- `findings` — per-issue detail from `SummaryIssues` (Phase 4): `issueId`, `severity`, `jfrogSeverity` (omitted when same), `fixable`, `malicious` (true when present in `maliciousLookup`), `platforms` (which platforms the finding appeared on). Sorted Critical→Low then XRAY-ID ascending. Omitted when empty.
 
-The result is a single `EnhancedVulnerabilityReport` struct printed as indented JSON to stdout.
+The result is printed as indented JSON to stdout.
 
 ### GitHub Markdown output (`--output github-md`)
 
@@ -257,6 +270,7 @@ jf vulnreport check <image> [--repo <repo>] [flags]
                     ├── xraySvc.GetSummaryV2()             internal/xray_sdk.go
                     │   └── POST /api/v2/summary/artifact  → Xray  (severity counts + per-issue detail)
                 └── outputReport()
+                    ├── outputTableReport()                internal/check_runner.go
                     ├── outputJSONReport()                 internal/check_runner.go
                     │   └── convertToEnhancedReport()
                     └── outputMarkdownReport()             internal/check_runner.go
