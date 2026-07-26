@@ -65,17 +65,17 @@ type violationsArtifact struct {
 // The MaliciousPackage field is extracted during the initial query so no separate Events API
 // calls are needed downstream.
 type xrayViolation struct {
-	ViolationID        string          `json:"violation_id"`
-	Description        string          `json:"description"`
-	Severity           string          `json:"severity"`
-	Type               string          `json:"type"`
-	IssueID            string          `json:"issue_id"`
-	InfectedComponents []string        `json:"infected_components"`
-	InfectedVersions   []string        `json:"infected_versions"`
-	FixVersions        []string        `json:"fix_versions,omitempty"`
-	Created            string          `json:"created"`
-	MaliciousPackage   bool            `json:"malicious_package,omitempty"`
-	Properties         any             `json:"properties,omitempty"`
+	ViolationID         string             `json:"violation_id"`
+	Description         string             `json:"description"`
+	Severity            string             `json:"severity"`
+	Type                string             `json:"type"`
+	IssueID             string             `json:"issue_id"`
+	InfectedComponents  []string           `json:"infected_components"`
+	InfectedVersions    []string           `json:"infected_versions"`
+	FixVersions         []string           `json:"fix_versions,omitempty"`
+	Created             string             `json:"created"`
+	MaliciousPackage    bool               `json:"malicious_package,omitempty"`
+	Properties          any                `json:"properties,omitempty"`
 	ExtendedInformation *xrayViolationInfo `json:"extended_information,omitempty"`
 }
 
