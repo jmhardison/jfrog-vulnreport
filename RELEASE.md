@@ -1,5 +1,10 @@
 # Release Notes
 
+## v1.0.1
+
+- fix: go fmt (#11)
+
+
 ## v1.0.0
 
 - feat: prep for v1 (#10)
