@@ -237,6 +237,16 @@ The result is printed as indented JSON to stdout.
 
 In GitHub Markdown mode, all log output is suppressed (log level set to ERROR) so only the markdown goes to stdout — this makes it safe to pipe directly into a CI pipeline step.
 
+### File output (`--save-output json,github-md`)
+
+When `--save-output` is set, `saveOutputToFiles()` is called **instead of** `outputReport()`. It:
+1. Splits the value on commas and trims whitespace around each format name.
+2. For `json`: creates `vulnreport.json` in the CWD and calls `outputJSONReport(f, ...)`.
+3. For `github-md`: creates `vulnreport.md` in the CWD and calls `outputMarkdownReport(f, ...)`.
+4. Prints `Saved: vulnreport.json, vulnreport.md` (or whichever files were written) to stdout — no report body appears on the terminal.
+
+JFrog APIs are queried once; both files are formatted from the same in-memory result. The `--fail-on-vuln` check still runs after file writing, so a non-zero exit and the saved files are produced together when both flags are set.
+
 ---
 
 ## 5. Exit Behavior
@@ -269,7 +279,10 @@ jf vulnreport check <image> [--repo <repo>] [flags]
                     │   └── POST /api/v1/violations        → Xray  (builds maliciousLookup)
                     ├── xraySvc.GetSummaryV2()             internal/xray_sdk.go
                     │   └── POST /api/v2/summary/artifact  → Xray  (severity counts + per-issue detail)
-                └── outputReport()
+                ├── saveOutputToFiles()    [when --save-output is set]
+            │   ├── outputJSONReport()   → vulnreport.json
+            │   └── outputMarkdownReport() → vulnreport.md
+            └── outputReport()         [default — writes to stdout]
                     ├── outputTableReport()                internal/check_runner.go
                     ├── outputJSONReport()                 internal/check_runner.go
                     │   └── convertToEnhancedReport()

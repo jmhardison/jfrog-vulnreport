@@ -71,6 +71,9 @@ func setLogLevel(conf *CheckConfiguration) {
 	}
 }
 
+// RunCheckCommand is the CLI entry point for the check command. It reads all flags from
+// the components.Context, validates required fields, initializes SDK services via the
+// JFrog CLI credential framework, and delegates to RunCheckCommandFromConf.
 func RunCheckCommand(c *components.Context, appName, appVersion string) error {
 	if len(c.Arguments) == 0 {
 		return fmt.Errorf("image name is required. Usage: check <image:tag>")
@@ -200,7 +203,7 @@ func saveOutputToFiles(conf *CheckConfiguration, report *VulnerabilityReport, ma
 				return fmt.Errorf("failed to create vulnreport.json: %w", err)
 			}
 			defer f.Close()
-			if err := outputJSONReport(f, report, maliciousLookup); err != nil {
+			if err := outputJSONReport(f, report, maliciousLookup, conf.AppName, conf.AppVersion); err != nil {
 				return fmt.Errorf("failed to write vulnreport.json: %w", err)
 			}
 			savedFiles = append(savedFiles, "vulnreport.json")
@@ -462,7 +465,7 @@ func outputReport(w io.Writer, report *VulnerabilityReport, maliciousLookup map[
 	case "table":
 		return outputTableReport(w, report, maliciousLookup, manifestUrl, minSeverity, noFindings, appName, appVersion)
 	case "json":
-		return outputJSONReport(w, report, maliciousLookup)
+		return outputJSONReport(w, report, maliciousLookup, appName, appVersion)
 	case "github-md":
 		return outputMarkdownReport(w, report, maliciousLookup, manifestUrl, minSeverity, noFindings, appName, appVersion)
 	default:
@@ -472,9 +475,9 @@ func outputReport(w io.Writer, report *VulnerabilityReport, maliciousLookup map[
 
 // outputJSONReport converts the VulnerabilityReport to an EnhancedVulnerabilityReport (with per-finding
 // malicious status and issue type counts), then prints it as indented JSON to w.
-func outputJSONReport(w io.Writer, report *VulnerabilityReport, maliciousLookup map[string]bool) error {
+func outputJSONReport(w io.Writer, report *VulnerabilityReport, maliciousLookup map[string]bool, appName, appVersion string) error {
 	// Convert to enhanced format using pre-built malicious lookup (no Events API calls needed).
-	enhanced := convertToEnhancedReport(report, maliciousLookup)
+	enhanced := convertToEnhancedReport(report, maliciousLookup, appName, appVersion)
 
 	jsonData, err := json.MarshalIndent(enhanced, "", "  ")
 	if err != nil {
@@ -488,7 +491,7 @@ func outputJSONReport(w io.Writer, report *VulnerabilityReport, maliciousLookup 
 // convertToEnhancedReport builds an EnhancedVulnerabilityReport from a VulnerabilityReport.
 // Per-issue detail from SummaryIssues is serialized as the top-level Findings array; malicious
 // status on each finding is resolved from maliciousLookup (built from the Violations API).
-func convertToEnhancedReport(report *VulnerabilityReport, maliciousLookup map[string]bool) *EnhancedVulnerabilityReport {
+func convertToEnhancedReport(report *VulnerabilityReport, maliciousLookup map[string]bool, appName, appVersion string) *EnhancedVulnerabilityReport {
 	var findings []EnhancedFinding
 	fixableCount := 0
 	for _, si := range report.SummaryIssues {
@@ -525,6 +528,8 @@ func convertToEnhancedReport(report *VulnerabilityReport, maliciousLookup map[st
 	return &EnhancedVulnerabilityReport{
 		ImageName:       report.ImageName,
 		GeneratedAt:     report.GeneratedAt,
+		PluginName:      appName,
+		PluginVersion:   appVersion,
 		ImageNotFound:   report.ImageNotFound,
 		MaliciousIssues: maliciousIssues,
 		Summary: SecuritySummary{

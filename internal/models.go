@@ -109,6 +109,8 @@ type DockerRegistryClient struct {
 type EnhancedVulnerabilityReport struct {
 	ImageName       string                 `json:"imageName"`
 	GeneratedAt     string                 `json:"generatedAt"`
+	PluginName      string                 `json:"pluginName,omitempty"`
+	PluginVersion   string                 `json:"pluginVersion,omitempty"`
 	ImageNotFound   bool                   `json:"imageNotFound,omitempty"`
 	Summary         SecuritySummary        `json:"summary"`
 	MaliciousIssues []string               `json:"maliciousIssues,omitempty"`

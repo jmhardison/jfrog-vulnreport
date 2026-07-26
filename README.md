@@ -68,6 +68,7 @@ jf vulnreport ck <image:tag> [flags]
 | `--project-key` | No | `default` | Xray project key for violation queries — only needed when the watch is scoped to a JFrog project |
 | `--docker-registry-url` | No | derived from server | Override the Docker registry base URL |
 | `--debug` | No | `false` | Enable debug-level logging for troubleshooting |
+| `--save-output` | No | — | Comma-separated formats to save to files in the current directory: `json` (→ `vulnreport.json`) and/or `github-md` (→ `vulnreport.md`). Console prints only `Saved: …` — no report body on stdout. |
 
 **Log verbosity**
 
@@ -108,6 +109,11 @@ jf vulnreport check team/myapp:1.2.3 \
 jf vulnreport check team/myapp:1.2.3 \
   --malicious-watch-name org-malicious-watch \
   --platform linux/amd64
+
+# Save JSON and markdown files to disk (useful in CI for artifact upload)
+jf vulnreport check team/myapp:1.2.3 \
+  --malicious-watch-name org-malicious-watch \
+  --save-output json,github-md
 ```
 
 ## Output Formats
@@ -128,6 +134,15 @@ ANSI colors are applied automatically when stdout is a TTY (red for Critical/Mal
 ### `json`
 
 Structured JSON including image metadata, severity counts, platform list, malicious issue IDs, and a full findings array. Suitable for downstream tooling and audit pipelines.
+
+### Saving to files (`--save-output`)
+
+Any combination of `json` and `github-md` can be written to files in the current working directory instead of stdout. When `--save-output` is set, the console prints only `Saved: vulnreport.json, vulnreport.md` — no report body appears on the terminal. JFrog APIs are queried once; the saved files are formatted from that single result set. This is useful in CI pipelines to archive the report as a build artifact while keeping console output clean.
+
+```bash
+jf vulnreport check myapp:v1 --malicious-watch-name my-watch --save-output json,github-md
+# Saved: vulnreport.json, vulnreport.md
+```
 
 ### `github-md`
 

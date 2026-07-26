@@ -650,7 +650,7 @@ func TestOutputJSONReport_ImageNotFound(t *testing.T) {
 		ImageNotFound: true,
 	}
 	var buf bytes.Buffer
-	require.NoError(t, outputJSONReport(&buf, report, map[string]bool{}))
+	require.NoError(t, outputJSONReport(&buf, report, map[string]bool{}, "vulnreport", "vtest"))
 
 	var enhanced EnhancedVulnerabilityReport
 	require.NoError(t, json.Unmarshal(buf.Bytes(), &enhanced))
@@ -658,6 +658,20 @@ func TestOutputJSONReport_ImageNotFound(t *testing.T) {
 	assert.Equal(t, 0, enhanced.Summary.TotalFindings)
 	assert.Equal(t, 0, enhanced.Summary.MaliciousCount)
 	assert.Empty(t, enhanced.Platforms)
+}
+
+func TestOutputJSONReport_AppNameVersionPresent(t *testing.T) {
+	report := &VulnerabilityReport{
+		ImageName:   "docker-local/app:v1",
+		GeneratedAt: "2026-01-01T00:00:00Z",
+	}
+	var buf bytes.Buffer
+	require.NoError(t, outputJSONReport(&buf, report, map[string]bool{}, "vulnreport", "v0.1.9"))
+
+	var enhanced EnhancedVulnerabilityReport
+	require.NoError(t, json.Unmarshal(buf.Bytes(), &enhanced))
+	assert.Equal(t, "vulnreport", enhanced.PluginName)
+	assert.Equal(t, "v0.1.9", enhanced.PluginVersion)
 }
 
 func TestOutputJSONReport_WithCounts(t *testing.T) {
@@ -677,7 +691,7 @@ func TestOutputJSONReport_WithCounts(t *testing.T) {
 	}
 	lookup := map[string]bool{"XRAY-1": true}
 	var buf bytes.Buffer
-	require.NoError(t, outputJSONReport(&buf, report, lookup))
+	require.NoError(t, outputJSONReport(&buf, report, lookup, "vulnreport", "vtest"))
 
 	var enhanced EnhancedVulnerabilityReport
 	require.NoError(t, json.Unmarshal(buf.Bytes(), &enhanced))
@@ -701,7 +715,7 @@ func TestOutputJSONReport_MaliciousCountFromMap(t *testing.T) {
 	}
 	lookup := map[string]bool{"A": true, "B": true, "C": true}
 	var buf bytes.Buffer
-	require.NoError(t, outputJSONReport(&buf, report, lookup))
+	require.NoError(t, outputJSONReport(&buf, report, lookup, "vulnreport", "vtest"))
 
 	var enhanced EnhancedVulnerabilityReport
 	require.NoError(t, json.Unmarshal(buf.Bytes(), &enhanced))
@@ -723,7 +737,7 @@ func TestOutputJSONReport_FindingsFromSummaryIssues(t *testing.T) {
 	}
 	lookup := map[string]bool{"XRAY-99": true}
 	var buf bytes.Buffer
-	require.NoError(t, outputJSONReport(&buf, report, lookup))
+	require.NoError(t, outputJSONReport(&buf, report, lookup, "vulnreport", "vtest"))
 
 	var enhanced EnhancedVulnerabilityReport
 	require.NoError(t, json.Unmarshal(buf.Bytes(), &enhanced))

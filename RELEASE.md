@@ -6,6 +6,8 @@
 - feat: replace `--debug-paths` flag with `--debug` — enables DEBUG-level logging for troubleshooting artifact discovery
 - feat: default log level changed from INFO to WARN for `table` and `json` output — operational progress messages no longer appear unless `--debug` is set
 - feat: ANSI severity colors in `table` output (Critical/Malicious=red, High=yellow, Medium=cyan) — omitted automatically when stdout is not a TTY
+- feat: add `--save-output` flag — comma-separated list of `json` and/or `github-md`; writes `vulnreport.json` / `vulnreport.md` to the current working directory without re-querying JFrog APIs; console shows only "Saved: …"
+- feat: add `ck` alias for the `check` command — `jf vulnreport ck` dispatches the same action as `jf vulnreport check`
 
 ## v0.1.9
 
