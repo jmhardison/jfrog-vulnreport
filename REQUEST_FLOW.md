@@ -111,7 +111,7 @@ Result: a slice of `dockerPath` structs, one per platform to query.
 
 **File:** `internal/docker_paths.go` — `FilterManifestsByPlatform()`
 
-If `--platform linux/amd64` or `--os linux` was passed, the discovered platform paths are filtered here. Only the matching platform's manifest path(s) are kept. If nothing matches, the function returns early with an empty report.
+If `--platform linux/amd64` or `--platform linux` was passed, the discovered platform paths are filtered here. Only the matching platform's manifest path(s) are kept. If nothing matches, the function returns early with an empty report.
 
 A single word (e.g. `--platform linux`) is treated as OS only, not architecture.
 
@@ -214,10 +214,12 @@ ANSI severity colors are applied when stdout is a TTY (detected via `golang.org/
 ### JSON output (`--output json`)
 
 `outputJSONReport()` calls `convertToEnhancedReport()` which builds an `EnhancedVulnerabilityReport` with:
+- `pluginName` — plugin binary name (`vulnreport`); enables downstream tooling to identify the report generator
+- `pluginVersion` — plugin version string (e.g. `v0.1.10`); enables tracking which version generated the report
 - `summary` — aggregate counts (total, critical/high/medium/low, fixable, malicious, platform count); fixable count comes from `SummaryIssue.Fixable` across all findings
 - `maliciousIssues` — list of XRAY IDs returned by the malicious watch (omitted when empty)
 - `platforms` — list of platform OS/arch objects discovered for the image
-- `findings` — per-issue detail from `SummaryIssues` (Phase 4): `issueId`, `severity`, `jfrogSeverity` (omitted when same), `fixable`, `malicious` (true when present in `maliciousLookup`), `platforms` (which platforms the finding appeared on). Sorted Critical→Low then XRAY-ID ascending. Omitted when empty.
+- `findings` — per-issue detail from `SummaryIssues` (Phase 4): `issueId`, `severity`, `jfrogSeverity` (omitted when empty), `fixable`, `malicious` (true when present in `maliciousLookup`), `platforms` (which platforms the finding appeared on). Sorted Critical→Low then XRAY-ID ascending. Omitted when empty.
 
 The result is printed as indented JSON to stdout.
 

@@ -133,7 +133,7 @@ ANSI colors are applied automatically when stdout is a TTY (red for Critical/Mal
 
 ### `json`
 
-Structured JSON including image metadata, severity counts, platform list, malicious issue IDs, and a full findings array. Suitable for downstream tooling and audit pipelines.
+Structured JSON including image metadata, severity counts, platform list, malicious issue IDs, a full findings array, and the plugin name and version (`pluginName`, `pluginVersion`). Suitable for downstream tooling and audit pipelines.
 
 ### Saving to files (`--save-output`)
 

@@ -8,6 +8,7 @@
 - feat: ANSI severity colors in `table` output (Critical/Malicious=red, High=yellow, Medium=cyan) — omitted automatically when stdout is not a TTY
 - feat: add `--save-output` flag — comma-separated list of `json` and/or `github-md`; writes `vulnreport.json` / `vulnreport.md` to the current working directory without re-querying JFrog APIs; console shows only "Saved: …"
 - feat: add `ck` alias for the `check` command — `jf vulnreport ck` dispatches the same action as `jf vulnreport check`
+- feat: JSON output now includes `pluginName` and `pluginVersion` fields at the top level of every report — enables downstream tooling to track which plugin version generated the file
 
 ## v0.1.9
 
