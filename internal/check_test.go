@@ -1020,7 +1020,7 @@ func TestSaveOutput_JSON(t *testing.T) {
 	assert.NotContains(t, out, "Security Summary")
 
 	// File exists and contains valid JSON with expected content.
-	data, err := os.ReadFile(filepath.Join(tmp, "vulnreport.json"))
+	data, err := os.ReadFile(filepath.Join(tmp, "vulnreport.json")) //nolint:gosec // G304: path is test-controlled temp dir
 	require.NoError(t, err)
 	var report EnhancedVulnerabilityReport
 	require.NoError(t, json.Unmarshal(data, &report), "vulnreport.json must be valid JSON")
@@ -1051,7 +1051,7 @@ func TestSaveOutput_GithubMD(t *testing.T) {
 	assert.Contains(t, out, "vulnreport.md")
 	assert.NotContains(t, out, "Security Summary")
 
-	data, err := os.ReadFile(filepath.Join(tmp, "vulnreport.md"))
+	data, err := os.ReadFile(filepath.Join(tmp, "vulnreport.md")) //nolint:gosec // G304: path is test-controlled temp dir
 	require.NoError(t, err)
 	md := string(data)
 	assert.Contains(t, md, "badge-malicious.png")
@@ -1163,7 +1163,7 @@ func TestSaveOutput_FailOnVulnStillFires(t *testing.T) {
 	assert.Contains(t, vulnErr.Error(), "vulnerability")
 
 	// File must have been written before the error was returned.
-	data, err := os.ReadFile(filepath.Join(tmp, "vulnreport.json"))
+	data, err := os.ReadFile(filepath.Join(tmp, "vulnreport.json")) //nolint:gosec // G304: path is test-controlled temp dir
 	require.NoError(t, err, "vulnreport.json must be written even when fail-on-vuln fires")
 	var report EnhancedVulnerabilityReport
 	require.NoError(t, json.Unmarshal(data, &report))
@@ -1198,7 +1198,7 @@ func TestSaveOutput_ImageNotFound(t *testing.T) {
 		require.NoError(t, RunCheckCommandFromConf(conf, "docker-local", "noexist", "notag", srv.URL, xraySvc, artSvc))
 	})
 
-	data, err := os.ReadFile(filepath.Join(tmp, "vulnreport.json"))
+	data, err := os.ReadFile(filepath.Join(tmp, "vulnreport.json")) //nolint:gosec // G304: path is test-controlled temp dir
 	require.NoError(t, err)
 	var report EnhancedVulnerabilityReport
 	require.NoError(t, json.Unmarshal(data, &report))
@@ -1229,7 +1229,7 @@ func TestSaveOutput_MinSeverityRespectedInFile(t *testing.T) {
 
 	require.NoError(t, saveOutputToFiles(conf, report, map[string]bool{}, ""))
 
-	data, err := os.ReadFile(filepath.Join(tmp, "vulnreport.md"))
+	data, err := os.ReadFile(filepath.Join(tmp, "vulnreport.md")) //nolint:gosec // G304: path is test-controlled temp dir
 	require.NoError(t, err)
 	md := string(data)
 	assert.Contains(t, md, "XRAY-CRIT", "Critical must appear: meets --min-severity High")
@@ -1259,7 +1259,7 @@ func TestSaveOutput_NoFindingsRespectedInFile(t *testing.T) {
 
 	require.NoError(t, saveOutputToFiles(conf, report, map[string]bool{}, ""))
 
-	data, err := os.ReadFile(filepath.Join(tmp, "vulnreport.md"))
+	data, err := os.ReadFile(filepath.Join(tmp, "vulnreport.md")) //nolint:gosec // G304: path is test-controlled temp dir
 	require.NoError(t, err)
 	md := string(data)
 	assert.NotContains(t, md, "<details>", "--no-findings must suppress the collapsible table")

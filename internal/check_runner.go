@@ -31,6 +31,36 @@ const (
 	MediaTypeOCIIndex     = "application/vnd.oci.image.index.v1+json"
 )
 
+// errWriter wraps an io.Writer and captures the first write error. Its writef/writeln methods
+// have no return values so callers are not forced to check each call site individually; a single
+// check of ew.err at the end of the function is sufficient (satisfies errcheck).
+type errWriter struct {
+	w   io.Writer
+	err error
+}
+
+func (ew *errWriter) Write(p []byte) (n int, err error) {
+	if ew.err != nil {
+		return 0, ew.err
+	}
+	n, ew.err = ew.w.Write(p)
+	return n, ew.err
+}
+
+func (ew *errWriter) writef(format string, args ...any) {
+	if ew.err != nil {
+		return
+	}
+	_, ew.err = fmt.Fprintf(ew.w, format, args...)
+}
+
+func (ew *errWriter) writeln(args ...any) {
+	if ew.err != nil {
+		return
+	}
+	_, ew.err = fmt.Fprintln(ew.w, args...)
+}
+
 // colorEnabled returns true when stdout is an interactive terminal that supports ANSI colors.
 func colorEnabled() bool {
 	return term.IsTerminal(int(os.Stdout.Fd()))
@@ -202,9 +232,12 @@ func saveOutputToFiles(conf *CheckConfiguration, report *VulnerabilityReport, ma
 			if err != nil {
 				return fmt.Errorf("failed to create vulnreport.json: %w", err)
 			}
-			defer f.Close()
-			if err := outputJSONReport(f, report, maliciousLookup, conf.AppName, conf.AppVersion); err != nil {
-				return fmt.Errorf("failed to write vulnreport.json: %w", err)
+			writeErr := outputJSONReport(f, report, maliciousLookup, conf.AppName, conf.AppVersion)
+			if closeErr := f.Close(); writeErr == nil && closeErr != nil {
+				writeErr = fmt.Errorf("failed to close vulnreport.json: %w", closeErr)
+			}
+			if writeErr != nil {
+				return fmt.Errorf("failed to write vulnreport.json: %w", writeErr)
 			}
 			savedFiles = append(savedFiles, "vulnreport.json")
 		case "github-md":
@@ -212,9 +245,12 @@ func saveOutputToFiles(conf *CheckConfiguration, report *VulnerabilityReport, ma
 			if err != nil {
 				return fmt.Errorf("failed to create vulnreport.md: %w", err)
 			}
-			defer f.Close()
-			if err := outputMarkdownReport(f, report, maliciousLookup, uiPortalManifestUrl, conf.MinSeverity, conf.NoFindings, conf.AppName, conf.AppVersion); err != nil {
-				return fmt.Errorf("failed to write vulnreport.md: %w", err)
+			writeErr := outputMarkdownReport(f, report, maliciousLookup, uiPortalManifestUrl, conf.MinSeverity, conf.NoFindings, conf.AppName, conf.AppVersion)
+			if closeErr := f.Close(); writeErr == nil && closeErr != nil {
+				writeErr = fmt.Errorf("failed to close vulnreport.md: %w", closeErr)
+			}
+			if writeErr != nil {
+				return fmt.Errorf("failed to write vulnreport.md: %w", writeErr)
 			}
 			savedFiles = append(savedFiles, "vulnreport.md")
 		default:
@@ -239,56 +275,56 @@ func generateSecurityBanner(w io.Writer, report *VulnerabilityReport, maliciousL
 	switch {
 	case hasMalicious:
 		// RED banner for malicious content
-		fmt.Fprintln(w, "![Malicious](https://raw.githubusercontent.com/jmhardison/jfrog-vulnreport/main/images/badge-malicious.png)")
-		fmt.Fprintln(w, "---")
-		fmt.Fprintln(w)
-		fmt.Fprintln(w, "> [!CAUTION]")
-		fmt.Fprintln(w, "> ## :rotating_light: MALICIOUS EXPLOIT PRESENT :rotating_light:")
-		fmt.Fprintln(w, "> **IMMEDIATE ACTION REQUIRED** - Malicious content detected in this image. Remediate or seek guidance.")
-		fmt.Fprintln(w, "> Policies can prevent the download and execution of this image, resulting in potential deploy issues such as `imagePullBackoff`.")
-		fmt.Fprintln(w, "> Do `not` promote until confirmed, and stop use of image if not a false positive.")
-		fmt.Fprintln(w)
-		fmt.Fprintln(w)
-		fmt.Fprintln(w, "---")
-		fmt.Fprintln(w)
+		_, _ = fmt.Fprintln(w, "![Malicious](https://raw.githubusercontent.com/jmhardison/jfrog-vulnreport/main/images/badge-malicious.png)")
+		_, _ = fmt.Fprintln(w, "---")
+		_, _ = fmt.Fprintln(w)
+		_, _ = fmt.Fprintln(w, "> [!CAUTION]")
+		_, _ = fmt.Fprintln(w, "> ## :rotating_light: MALICIOUS EXPLOIT PRESENT :rotating_light:")
+		_, _ = fmt.Fprintln(w, "> **IMMEDIATE ACTION REQUIRED** - Malicious content detected in this image. Remediate or seek guidance.")
+		_, _ = fmt.Fprintln(w, "> Policies can prevent the download and execution of this image, resulting in potential deploy issues such as `imagePullBackoff`.")
+		_, _ = fmt.Fprintln(w, "> Do `not` promote until confirmed, and stop use of image if not a false positive.")
+		_, _ = fmt.Fprintln(w)
+		_, _ = fmt.Fprintln(w)
+		_, _ = fmt.Fprintln(w, "---")
+		_, _ = fmt.Fprintln(w)
 	case hasCritical:
 		// ORANGE banner for critical CVEs (no malicious)
-		fmt.Fprintln(w, "![Critical CVEs](https://raw.githubusercontent.com/jmhardison/jfrog-vulnreport/main/images/badge-critical-cve.png)")
-		fmt.Fprintln(w, "---")
-		fmt.Fprintln(w)
-		fmt.Fprintln(w, "> [!CAUTION]")
-		fmt.Fprintln(w, "> ## :red_circle: CRITICAL CVE'S PRESENT")
-		fmt.Fprintln(w, "> Critical severity vulnerabilities found - review and remediation required.")
-		fmt.Fprintln(w, "> Fixable critical issues should be resolved before promotion.")
-		fmt.Fprintln(w)
-		fmt.Fprintln(w)
-		fmt.Fprintln(w, "---")
-		fmt.Fprintln(w)
+		_, _ = fmt.Fprintln(w, "![Critical CVEs](https://raw.githubusercontent.com/jmhardison/jfrog-vulnreport/main/images/badge-critical-cve.png)")
+		_, _ = fmt.Fprintln(w, "---")
+		_, _ = fmt.Fprintln(w)
+		_, _ = fmt.Fprintln(w, "> [!CAUTION]")
+		_, _ = fmt.Fprintln(w, "> ## :red_circle: CRITICAL CVE'S PRESENT")
+		_, _ = fmt.Fprintln(w, "> Critical severity vulnerabilities found - review and remediation required.")
+		_, _ = fmt.Fprintln(w, "> Fixable critical issues should be resolved before promotion.")
+		_, _ = fmt.Fprintln(w)
+		_, _ = fmt.Fprintln(w)
+		_, _ = fmt.Fprintln(w, "---")
+		_, _ = fmt.Fprintln(w)
 	case hasFindings:
 		// YELLOW banner for non-critical CVEs present
-		fmt.Fprintln(w, "![CVEs Present](https://raw.githubusercontent.com/jmhardison/jfrog-vulnreport/main/images/badge-cves-present.png)")
-		fmt.Fprintln(w, "---")
-		fmt.Fprintln(w)
-		fmt.Fprintln(w, "> [!WARNING]")
-		fmt.Fprintln(w, "> ## :warning: CVE's PRESENT")
-		fmt.Fprintln(w, "> Security vulnerabilities found - review and remediate as needed")
-		fmt.Fprintln(w, "> Promotion won't be blocked, however fixable issues should be resolved before promotion when possible.")
-		fmt.Fprintln(w)
-		fmt.Fprintln(w)
-		fmt.Fprintln(w, "---")
-		fmt.Fprintln(w)
+		_, _ = fmt.Fprintln(w, "![CVEs Present](https://raw.githubusercontent.com/jmhardison/jfrog-vulnreport/main/images/badge-cves-present.png)")
+		_, _ = fmt.Fprintln(w, "---")
+		_, _ = fmt.Fprintln(w)
+		_, _ = fmt.Fprintln(w, "> [!WARNING]")
+		_, _ = fmt.Fprintln(w, "> ## :warning: CVE's PRESENT")
+		_, _ = fmt.Fprintln(w, "> Security vulnerabilities found - review and remediate as needed")
+		_, _ = fmt.Fprintln(w, "> Promotion won't be blocked, however fixable issues should be resolved before promotion when possible.")
+		_, _ = fmt.Fprintln(w)
+		_, _ = fmt.Fprintln(w)
+		_, _ = fmt.Fprintln(w, "---")
+		_, _ = fmt.Fprintln(w)
 	default:
 		// GREEN banner for clean image
-		fmt.Fprintln(w, "![No Findings](https://raw.githubusercontent.com/jmhardison/jfrog-vulnreport/main/images/badge-no-findings.png)")
-		fmt.Fprintln(w, "---")
-		fmt.Fprintln(w)
-		fmt.Fprintln(w, "> [!NOTE]")
-		fmt.Fprintln(w, "> ## :white_check_mark: NO FINDINGS")
-		fmt.Fprintln(w, "> No security issues found - image appears clean")
-		fmt.Fprintln(w)
-		fmt.Fprintln(w)
-		fmt.Fprintln(w, "---")
-		fmt.Fprintln(w)
+		_, _ = fmt.Fprintln(w, "![No Findings](https://raw.githubusercontent.com/jmhardison/jfrog-vulnreport/main/images/badge-no-findings.png)")
+		_, _ = fmt.Fprintln(w, "---")
+		_, _ = fmt.Fprintln(w)
+		_, _ = fmt.Fprintln(w, "> [!NOTE]")
+		_, _ = fmt.Fprintln(w, "> ## :white_check_mark: NO FINDINGS")
+		_, _ = fmt.Fprintln(w, "> No security issues found - image appears clean")
+		_, _ = fmt.Fprintln(w)
+		_, _ = fmt.Fprintln(w)
+		_, _ = fmt.Fprintln(w, "---")
+		_, _ = fmt.Fprintln(w)
 	}
 }
 
@@ -297,20 +333,21 @@ func generateSecurityBanner(w io.Writer, report *VulnerabilityReport, maliciousL
 // security findings table (filtered/sorted), footer. ANSI colors are enabled only when
 // stdout is an interactive terminal.
 func outputTableReport(w io.Writer, report *VulnerabilityReport, maliciousLookup map[string]bool, manifestUrl string, minSeverity string, noFindings bool, appName, appVersion string) error {
+	ew := &errWriter{w: w}
 	colors := colorEnabled()
 
 	// --- Header ---
-	fmt.Fprintf(w, "Xray Security Report: %s\n", report.ImageName)
+	ew.writef("Xray Security Report: %s\n", report.ImageName)
 	if manifestUrl != "" {
-		fmt.Fprintln(w, manifestUrl)
+		ew.writeln(manifestUrl)
 	}
-	fmt.Fprintln(w)
+	ew.writeln()
 
 	if report.ImageNotFound {
-		fmt.Fprintln(w, "No Image Found — check the image name/tag, or that publishing is complete.")
-		fmt.Fprintln(w)
-		fmt.Fprintf(w, "Generated by %s %s\n", appName, appVersion)
-		return nil
+		ew.writeln("No Image Found — check the image name/tag, or that publishing is complete.")
+		ew.writeln()
+		ew.writef("Generated by %s %s\n", appName, appVersion)
+		return ew.err
 	}
 
 	// --- Status banner ---
@@ -323,25 +360,25 @@ func outputTableReport(w io.Writer, report *VulnerabilityReport, maliciousLookup
 		if colors {
 			msg = text.Colors{text.Bold, text.FgRed}.Sprint(msg)
 		}
-		fmt.Fprintf(w, "⚠ STATUS: %s\n\n", msg)
+		ew.writef("⚠ STATUS: %s\n\n", msg)
 	case hasCritical:
 		msg := "CRITICAL CVEs PRESENT — review and remediation required"
 		if colors {
 			msg = text.FgRed.Sprint(msg)
 		}
-		fmt.Fprintf(w, "⚠ STATUS: %s\n\n", msg)
+		ew.writef("⚠ STATUS: %s\n\n", msg)
 	case hasFindings:
 		msg := "CVEs PRESENT — review and remediate as needed"
 		if colors {
 			msg = text.FgYellow.Sprint(msg)
 		}
-		fmt.Fprintf(w, "⚠ STATUS: %s\n\n", msg)
+		ew.writef("⚠ STATUS: %s\n\n", msg)
 	default:
 		msg := "NO FINDINGS — image appears clean"
 		if colors {
 			msg = text.FgGreen.Sprint(msg)
 		}
-		fmt.Fprintf(w, "✓ STATUS: %s\n\n", msg)
+		ew.writef("✓ STATUS: %s\n\n", msg)
 	}
 
 	// --- Security Summary table ---
@@ -357,9 +394,9 @@ func outputTableReport(w io.Writer, report *VulnerabilityReport, maliciousLookup
 		platformLabels = append(platformLabels, p.Platform.OS+"/"+p.Platform.Architecture)
 	}
 
-	fmt.Fprintln(w, "Security Summary")
+	ew.writeln("Security Summary")
 	sumT := table.NewWriter()
-	sumT.SetOutputMirror(w)
+	sumT.SetOutputMirror(ew)
 	sumT.SetStyle(table.StyleLight)
 	sumT.Style().Options.SeparateHeader = false
 	sumT.AppendRows([]table.Row{
@@ -373,7 +410,7 @@ func outputTableReport(w io.Writer, report *VulnerabilityReport, maliciousLookup
 		{"Platforms", fmt.Sprintf("%d (%s)", len(report.Platforms), strings.Join(platformLabels, ", "))},
 	})
 	sumT.Render()
-	fmt.Fprintln(w)
+	ew.writeln()
 
 	// --- Malicious Findings table ---
 	if maliciousCount > 0 {
@@ -381,16 +418,16 @@ func outputTableReport(w io.Writer, report *VulnerabilityReport, maliciousLookup
 		copy(sortedMal, report.MaliciousIssues)
 		sort.Strings(sortedMal)
 
-		fmt.Fprintf(w, "Malicious Findings (%d)\n", maliciousCount)
+		ew.writef("Malicious Findings (%d)\n", maliciousCount)
 		malT := table.NewWriter()
-		malT.SetOutputMirror(w)
+		malT.SetOutputMirror(ew)
 		malT.SetStyle(table.StyleLight)
 		malT.AppendHeader(table.Row{"XRAY-ID", "SEVERITY"})
 		for _, id := range sortedMal {
 			malT.AppendRow(table.Row{id, severityColor("Malicious", colors)})
 		}
 		malT.Render()
-		fmt.Fprintln(w)
+		ew.writeln()
 	}
 
 	// --- Security Findings table ---
@@ -416,9 +453,9 @@ func outputTableReport(w io.Writer, report *VulnerabilityReport, maliciousLookup
 					fCount++
 				}
 			}
-			fmt.Fprintf(w, "Security Findings (%d | %d fixable)\n", len(filtered), fCount)
+			ew.writef("Security Findings (%d | %d fixable)\n", len(filtered), fCount)
 			findT := table.NewWriter()
-			findT.SetOutputMirror(w)
+			findT.SetOutputMirror(ew)
 			findT.SetStyle(table.StyleLight)
 			findT.AppendHeader(table.Row{"XRAY-ID", "SEVERITY", "JFROG SEVERITY", "FIXABLE", "PLATFORMS"})
 			for _, si := range filtered {
@@ -447,14 +484,14 @@ func outputTableReport(w io.Writer, report *VulnerabilityReport, maliciousLookup
 				})
 			}
 			findT.Render()
-			fmt.Fprintln(w)
+			ew.writeln()
 		}
 	}
 
 	// --- Footer ---
-	fmt.Fprintf(w, "Generated by %s %s at %s\n", appName, appVersion, report.GeneratedAt)
+	ew.writef("Generated by %s %s at %s\n", appName, appVersion, report.GeneratedAt)
 
-	return nil
+	return ew.err
 }
 
 // outputReport dispatches to the appropriate formatter based on the requested output format.
@@ -484,8 +521,8 @@ func outputJSONReport(w io.Writer, report *VulnerabilityReport, maliciousLookup 
 		return fmt.Errorf("failed to marshal JSON: %w", err)
 	}
 
-	fmt.Fprintln(w, string(jsonData))
-	return nil
+	_, err = fmt.Fprintln(w, string(jsonData))
+	return err
 }
 
 // convertToEnhancedReport builds an EnhancedVulnerabilityReport from a VulnerabilityReport.
@@ -552,64 +589,66 @@ func convertToEnhancedReport(report *VulnerabilityReport, maliciousLookup map[st
 // parameter is used to render a clickable link to the image's manifest in JFrog Platform UI —
 // constructed as <baseUrl>/ui/repos/tree/General/<repo>/<path>/list.manifest.json without additional HTTP requests.
 func outputMarkdownReport(w io.Writer, report *VulnerabilityReport, maliciousLookup map[string]bool, manifestUrl string, minSeverity string, noFindings bool, appName, appVersion string) error {
+	ew := &errWriter{w: w}
+
 	if report.ImageNotFound {
-		fmt.Fprintln(w, "![No Image Found](https://raw.githubusercontent.com/jmhardison/jfrog-vulnreport/main/images/badge-no-image-found.png)")
-		fmt.Fprintln(w, "---")
-		fmt.Fprintln(w)
-		fmt.Fprintf(w, "# Xray Security Report\n\n")
-		fmt.Fprintf(w, "## %s\n\n", report.ImageName)
-		fmt.Fprintln(w, "No Image Found - Check the image name/tag, or that publishing is complete.")
-		fmt.Fprintln(w)
-		fmt.Fprintf(w, "> Generated by %s %s\n", appName, appVersion)
-		fmt.Fprintln(w)
-		return nil
+		ew.writeln("![No Image Found](https://raw.githubusercontent.com/jmhardison/jfrog-vulnreport/main/images/badge-no-image-found.png)")
+		ew.writeln("---")
+		ew.writeln()
+		ew.writef("# Xray Security Report\n\n")
+		ew.writef("## %s\n\n", report.ImageName)
+		ew.writeln("No Image Found - Check the image name/tag, or that publishing is complete.")
+		ew.writeln()
+		ew.writef("> Generated by %s %s\n", appName, appVersion)
+		ew.writeln()
+		return ew.err
 	}
 
-	generateSecurityBanner(w, report, maliciousLookup)
+	generateSecurityBanner(ew, report, maliciousLookup)
 
-	fmt.Fprintf(w, "# Xray Security Report\n\n")
-	fmt.Fprintf(w, "## %s\n\n", report.ImageName)
+	ew.writef("# Xray Security Report\n\n")
+	ew.writef("## %s\n\n", report.ImageName)
 
 	if manifestUrl != "" {
-		fmt.Fprintf(w, "> **View manifest:** [%s](%s)\n\n", report.ImageName, manifestUrl)
+		ew.writef("> **View manifest:** [%s](%s)\n\n", report.ImageName, manifestUrl)
 	}
 
-	fmt.Fprintln(w)
+	ew.writeln()
 
-	fmt.Fprintln(w, "## Security Summary")
+	ew.writeln("## Security Summary")
 
 	maliciousCount := len(report.MaliciousIssues)
-	fmt.Fprintf(w, "- **Total Findings:** %d\n", report.TotalIssues)
-	fmt.Fprintf(w, "- **Critical:** %d | **High:** %d | **Medium:** %d | **Low:** %d\n",
+	ew.writef("- **Total Findings:** %d\n", report.TotalIssues)
+	ew.writef("- **Critical:** %d | **High:** %d | **Medium:** %d | **Low:** %d\n",
 		report.CriticalCount, report.HighCount, report.MediumCount, report.LowCount)
-	fmt.Fprintf(w, "- **Malicious:** %d\n", maliciousCount)
-	fmt.Fprintf(w, "- **Platforms Scanned:** %d\n", len(report.Platforms))
+	ew.writef("- **Malicious:** %d\n", maliciousCount)
+	ew.writef("- **Platforms Scanned:** %d\n", len(report.Platforms))
 	if len(report.Platforms) > 0 {
 		var platformList []string
 		for _, p := range report.Platforms {
 			platformList = append(platformList, fmt.Sprintf("%s/%s", p.Platform.OS, p.Platform.Architecture))
 		}
-		fmt.Fprintf(w, "- **Platforms:** %s\n\n", strings.Join(platformList, ", "))
+		ew.writef("- **Platforms:** %s\n\n", strings.Join(platformList, ", "))
 	} else {
-		fmt.Fprintln(w)
+		ew.writeln()
 	}
 
 	if maliciousCount > 0 {
-		fmt.Fprintln(w)
-		fmt.Fprintln(w, "---")
-		fmt.Fprintln(w)
-		fmt.Fprintf(w, "## :bangbang: Malicious Findings (%d)\n", maliciousCount)
-		fmt.Fprintln(w, "| Xray ID | Severity |")
-		fmt.Fprintln(w, "|---------|----------|")
+		ew.writeln()
+		ew.writeln("---")
+		ew.writeln()
+		ew.writef("## :bangbang: Malicious Findings (%d)\n", maliciousCount)
+		ew.writeln("| Xray ID | Severity |")
+		ew.writeln("|---------|----------|")
 		sortedMal := make([]string, len(report.MaliciousIssues))
 		copy(sortedMal, report.MaliciousIssues)
 		sort.Strings(sortedMal)
 		for _, id := range sortedMal {
-			fmt.Fprintf(w, "| %s | %s |\n", id, severityLabel("Malicious"))
+			ew.writef("| %s | %s |\n", id, severityLabel("Malicious"))
 		}
-		fmt.Fprintln(w)
-		fmt.Fprintln(w, "---")
-		fmt.Fprintln(w)
+		ew.writeln()
+		ew.writeln("---")
+		ew.writeln()
 	}
 
 	// Security findings table — collapsible, filtered by minSeverity, sorted Critical→Low then XRAY-ID.
@@ -634,12 +673,12 @@ func outputMarkdownReport(w io.Writer, report *VulnerabilityReport, maliciousLoo
 					fixableCount++
 				}
 			}
-			fmt.Fprintln(w)
-			fmt.Fprintln(w, "---")
-			fmt.Fprintln(w)
-			fmt.Fprintf(w, "<details>\n<summary>Security Findings (%d | %d fixable) — click to expand</summary>\n\n", len(filtered), fixableCount)
-			fmt.Fprintln(w, "| XRAY-ID | SEVERITY | JFROG SEVERITY | FIXABLE | PLATFORMS |")
-			fmt.Fprintln(w, "|---------|----------|----------------|---------|-----------|")
+			ew.writeln()
+			ew.writeln("---")
+			ew.writeln()
+			ew.writef("<details>\n<summary>Security Findings (%d | %d fixable) — click to expand</summary>\n\n", len(filtered), fixableCount)
+			ew.writeln("| XRAY-ID | SEVERITY | JFROG SEVERITY | FIXABLE | PLATFORMS |")
+			ew.writeln("|---------|----------|----------------|---------|-----------|")
 			for _, si := range filtered {
 				fixable := "No"
 				if si.Fixable {
@@ -649,7 +688,7 @@ func outputMarkdownReport(w io.Writer, report *VulnerabilityReport, maliciousLoo
 				if platformsStr == "" {
 					platformsStr = "-"
 				}
-				fmt.Fprintf(w, "| %s | %s | %s | %s | %s |\n",
+				ew.writef("| %s | %s | %s | %s | %s |\n",
 					si.IssueID,
 					severityLabel(si.Severity),
 					jfrogSeverityLabel(si.JFrogSeverity, si.Severity),
@@ -657,19 +696,19 @@ func outputMarkdownReport(w io.Writer, report *VulnerabilityReport, maliciousLoo
 					platformsStr,
 				)
 			}
-			fmt.Fprintln(w)
-			fmt.Fprintln(w, "</details>")
-			fmt.Fprintln(w)
+			ew.writeln()
+			ew.writeln("</details>")
+			ew.writeln()
 		}
 	}
 
-	fmt.Fprintln(w, "---")
-	fmt.Fprintln(w)
-	fmt.Fprintf(w, "> Xray scans trigger at upload time, but can be matched to new vulnerabilities over time without rescans.\n> These are findings as of %s.\n", report.GeneratedAt)
-	fmt.Fprintf(w, "> Generated by %s %s\n", appName, appVersion)
-	fmt.Fprintln(w)
+	ew.writeln("---")
+	ew.writeln()
+	ew.writef("> Xray scans trigger at upload time, but can be matched to new vulnerabilities over time without rescans.\n> These are findings as of %s.\n", report.GeneratedAt)
+	ew.writef("> Generated by %s %s\n", appName, appVersion)
+	ew.writeln()
 
-	return nil
+	return ew.err
 }
 
 // severityLabel returns an emoji-prefixed severity label for GitHub Markdown table cells.
