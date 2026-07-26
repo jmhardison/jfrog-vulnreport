@@ -1,5 +1,15 @@
 # Release Notes
 
+## v0.1.10
+
+- feat: add `table` output format (Unicode box-drawing tables) as the new default — `--output json` now required to get JSON output when not specified
+- feat: replace `--debug-paths` flag with `--debug` — enables DEBUG-level logging for troubleshooting artifact discovery
+- feat: default log level changed from INFO to WARN for `table` and `json` output — operational progress messages no longer appear unless `--debug` is set
+- feat: ANSI severity colors in `table` output (Critical/Malicious=red, High=yellow, Medium=cyan) — omitted automatically when stdout is not a TTY
+- feat: add `--save-output` flag — comma-separated list of `json` and/or `github-md`; writes `vulnreport.json` / `vulnreport.md` to the current working directory without re-querying JFrog APIs; console shows only "Saved: …"
+- feat: add `ck` alias for the `check` command — `jf vulnreport ck` dispatches the same action as `jf vulnreport check`
+- feat: JSON output now includes `pluginName` and `pluginVersion` fields at the top level of every report — enables downstream tooling to track which plugin version generated the file
+
 ## v0.1.9
 
 - fix: update from badgeio to baked png images.

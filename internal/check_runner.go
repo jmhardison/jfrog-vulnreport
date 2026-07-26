@@ -5,11 +5,14 @@ package internal
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"sort"
 	"strings"
 	"time"
 
+	"github.com/jedib0t/go-pretty/v6/table"
+	"github.com/jedib0t/go-pretty/v6/text"
 	"github.com/jfrog/jfrog-cli-core/v2/plugins/common"
 	"github.com/jfrog/jfrog-cli-core/v2/plugins/components"
 	configCore "github.com/jfrog/jfrog-cli-core/v2/utils/config"
@@ -17,6 +20,7 @@ import (
 	"github.com/jfrog/jfrog-client-go/http/jfroghttpclient"
 	"github.com/jfrog/jfrog-client-go/utils/log"
 	xraySdk "github.com/jfrog/jfrog-client-go/xray"
+	"golang.org/x/term"
 )
 
 // Constants for Docker media types recognized during manifest discovery.
@@ -27,6 +31,79 @@ const (
 	MediaTypeOCIIndex     = "application/vnd.oci.image.index.v1+json"
 )
 
+// errWriter wraps an io.Writer and captures the first write error. Its writef/writeln methods
+// have no return values so callers are not forced to check each call site individually; a single
+// check of ew.err at the end of the function is sufficient (satisfies errcheck).
+type errWriter struct {
+	w   io.Writer
+	err error
+}
+
+func (ew *errWriter) Write(p []byte) (n int, err error) {
+	if ew.err != nil {
+		return 0, ew.err
+	}
+	n, ew.err = ew.w.Write(p)
+	return n, ew.err
+}
+
+func (ew *errWriter) writef(format string, args ...any) {
+	if ew.err != nil {
+		return
+	}
+	_, ew.err = fmt.Fprintf(ew.w, format, args...)
+}
+
+func (ew *errWriter) writeln(args ...any) {
+	if ew.err != nil {
+		return
+	}
+	_, ew.err = fmt.Fprintln(ew.w, args...)
+}
+
+// colorEnabled returns true when stdout is an interactive terminal that supports ANSI colors.
+func colorEnabled() bool {
+	return term.IsTerminal(int(os.Stdout.Fd()))
+}
+
+// severityColor applies ANSI color to a severity string when colors are enabled.
+// Malicious=bold red, Critical=red, High=yellow, Medium=cyan, Low=plain.
+func severityColor(s string, enabled bool) string {
+	if !enabled {
+		return s
+	}
+	switch s {
+	case "Malicious":
+		return text.Colors{text.Bold, text.FgRed}.Sprint(s)
+	case "Critical":
+		return text.FgRed.Sprint(s)
+	case "High":
+		return text.FgYellow.Sprint(s)
+	case "Medium":
+		return text.FgCyan.Sprint(s)
+	default:
+		return s
+	}
+}
+
+// setLogLevel configures the JFrog SDK logger based on the active CheckConfiguration:
+//   - conf.Debug → DEBUG  (show everything, including pipeline trace messages)
+//   - conf.Silent → ERROR (suppress all output; used by github-md to keep stdout clean)
+//   - default → WARN      (show only warnings and errors; keeps JSON output clean)
+func setLogLevel(conf *CheckConfiguration) {
+	switch {
+	case conf.Debug:
+		log.SetLogger(log.NewLogger(log.DEBUG, os.Stderr))
+	case conf.Silent:
+		log.SetLogger(log.NewLogger(log.ERROR, os.Stderr))
+	default:
+		log.SetLogger(log.NewLogger(log.WARN, os.Stderr))
+	}
+}
+
+// RunCheckCommand is the CLI entry point for the check command. It reads all flags from
+// the components.Context, validates required fields, initializes SDK services via the
+// JFrog CLI credential framework, and delegates to RunCheckCommandFromConf.
 func RunCheckCommand(c *components.Context, appName, appVersion string) error {
 	if len(c.Arguments) == 0 {
 		return fmt.Errorf("image name is required. Usage: check <image:tag>")
@@ -37,7 +114,7 @@ func RunCheckCommand(c *components.Context, appName, appVersion string) error {
 
 	output := c.GetStringFlagValue("output")
 	if output == "" {
-		output = "json" // Default to JSON
+		output = "table"
 	}
 
 	conf := &CheckConfiguration{
@@ -48,11 +125,12 @@ func RunCheckCommand(c *components.Context, appName, appVersion string) error {
 		Output:             output,
 		Silent:             output == "github-md",
 		MinSeverity:        c.GetStringFlagValue("min-severity"),
-		DebugPaths:         c.GetBoolFlagValue("debug-paths"),
+		Debug:              c.GetBoolFlagValue("debug"),
 		DockerRegistryURL:  c.GetStringFlagValue("docker-registry-url"),
 		ProjectKey:         c.GetStringFlagValue("project-key"),
 		MaliciousWatchName: c.GetStringFlagValue("malicious-watch-name"),
 		NoFindings:         c.GetBoolFlagValue("no-findings"),
+		SaveOutput:         c.GetStringFlagValue("save-output"),
 		AppName:            appName,
 		AppVersion:         appVersion,
 	}
@@ -62,16 +140,14 @@ func RunCheckCommand(c *components.Context, appName, appVersion string) error {
 		conf.ProjectKey = "default"
 	}
 
-	if conf.Silent {
-		log.SetLogger(log.NewLogger(log.ERROR, os.Stderr))
-	}
+	setLogLevel(conf)
 
 	if conf.MaliciousWatchName == "" {
 		return fmt.Errorf("--malicious-watch-name is required — this watch defines which issue IDs are considered malicious")
 	}
 
 	// Parse image name to extract repository and tag
-	repoKey, imageName, tag, err := ParseImageName(conf.ImageName)
+	repoKey, imageName, tag, err := ParseImageName(conf.ImageName, c.GetStringFlagValue("repo"))
 	if err != nil {
 		return fmt.Errorf("invalid image format: %w", err)
 	}
@@ -85,7 +161,7 @@ func RunCheckCommand(c *components.Context, appName, appVersion string) error {
 	if err != nil {
 		return fmt.Errorf("failed to create Xray service: %w", err)
 	}
-	log.Info(fmt.Sprintf("[XrayService] URL=%s", xraySvc.XrayDetails.GetUrl()))
+	log.Debug(fmt.Sprintf("[XrayService] URL=%s", xraySvc.XrayDetails.GetUrl()))
 	artSvc, err := newArtifactoryService(serverDetails)
 	if err != nil {
 		return fmt.Errorf("failed to create Artifactory service: %w", err)
@@ -105,12 +181,8 @@ func RunCheckCommand(c *components.Context, appName, appVersion string) error {
 // artifactoryBaseURL is the JFrog Platform base URL (e.g. "https://company.jfrog.io") used to
 // build UI links; pass empty string to omit link generation.
 func RunCheckCommandFromConf(conf *CheckConfiguration, repoKey, imageName, tag, artifactoryBaseURL string, xraySvc *XrayService, artSvc *ArtifactoryService) error {
-	if conf.Silent {
-		log.SetLogger(log.NewLogger(log.ERROR, os.Stderr))
-	}
-	if !conf.Silent {
-		log.Info(fmt.Sprintf("Checking vulnerabilities for image: %s/%s:%s", repoKey, imageName, tag))
-	}
+	setLogLevel(conf)
+	log.Debug(fmt.Sprintf("Checking vulnerabilities for image: %s/%s:%s", repoKey, imageName, tag))
 
 	report, maliciousLookup, err := generateVulnerabilityReport(conf, repoKey, imageName, tag, xraySvc, artSvc)
 	if err != nil {
@@ -128,8 +200,14 @@ func RunCheckCommandFromConf(conf *CheckConfiguration, repoKey, imageName, tag, 
 		uiPortalManifestUrl = fmt.Sprintf("%s/ui/repos/tree/Xray/%s", artifactoryBaseURL, manifestPath)
 	}
 
-	if err := outputReport(report, maliciousLookup, conf.Output, uiPortalManifestUrl, conf.MinSeverity, conf.NoFindings, conf.AppName, conf.AppVersion); err != nil {
-		return fmt.Errorf("failed to output report: %w", err)
+	if conf.SaveOutput != "" {
+		if err := saveOutputToFiles(conf, report, maliciousLookup, uiPortalManifestUrl); err != nil {
+			return err
+		}
+	} else {
+		if err := outputReport(os.Stdout, report, maliciousLookup, conf.Output, uiPortalManifestUrl, conf.MinSeverity, conf.NoFindings, conf.AppName, conf.AppVersion); err != nil {
+			return fmt.Errorf("failed to output report: %w", err)
+		}
 	}
 
 	if conf.FailOnVuln && report.TotalIssues > 0 {
@@ -139,12 +217,57 @@ func RunCheckCommandFromConf(conf *CheckConfiguration, repoKey, imageName, tag, 
 	return nil
 }
 
+// saveOutputToFiles writes each format listed in conf.SaveOutput to its corresponding file
+// in the current working directory, then prints a confirmation line to stdout.
+// Supported formats: "json" → vulnreport.json, "github-md" → vulnreport.md.
+func saveOutputToFiles(conf *CheckConfiguration, report *VulnerabilityReport, maliciousLookup map[string]bool, uiPortalManifestUrl string) error {
+	formats := strings.Split(conf.SaveOutput, ",")
+	var savedFiles []string
+
+	for _, rawFmt := range formats {
+		format := strings.TrimSpace(rawFmt)
+		switch format {
+		case "json":
+			f, err := os.Create("vulnreport.json")
+			if err != nil {
+				return fmt.Errorf("failed to create vulnreport.json: %w", err)
+			}
+			writeErr := outputJSONReport(f, report, maliciousLookup, conf.AppName, conf.AppVersion)
+			if closeErr := f.Close(); writeErr == nil && closeErr != nil {
+				writeErr = fmt.Errorf("failed to close vulnreport.json: %w", closeErr)
+			}
+			if writeErr != nil {
+				return fmt.Errorf("failed to write vulnreport.json: %w", writeErr)
+			}
+			savedFiles = append(savedFiles, "vulnreport.json")
+		case "github-md":
+			f, err := os.Create("vulnreport.md")
+			if err != nil {
+				return fmt.Errorf("failed to create vulnreport.md: %w", err)
+			}
+			writeErr := outputMarkdownReport(f, report, maliciousLookup, uiPortalManifestUrl, conf.MinSeverity, conf.NoFindings, conf.AppName, conf.AppVersion)
+			if closeErr := f.Close(); writeErr == nil && closeErr != nil {
+				writeErr = fmt.Errorf("failed to close vulnreport.md: %w", closeErr)
+			}
+			if writeErr != nil {
+				return fmt.Errorf("failed to write vulnreport.md: %w", writeErr)
+			}
+			savedFiles = append(savedFiles, "vulnreport.md")
+		default:
+			return fmt.Errorf("unsupported --save-output format %q: use 'json' and/or 'github-md'", format)
+		}
+	}
+
+	fmt.Printf("Saved: %s\n", strings.Join(savedFiles, ", "))
+	return nil
+}
+
 // generateSecurityBanner renders a GitHub-flavored alert banner based on the highest-severity finding tier:
 //   - Malicious detected → [!CAUTION] red banner (always takes priority)
 //   - Critical CVEs, no malicious → [!CAUTION] orange banner
 //   - Non-critical CVEs, no malicious → [!WARNING] yellow banner
 //   - No findings → [!NOTE] green banner
-func generateSecurityBanner(report *VulnerabilityReport, maliciousLookup map[string]bool) {
+func generateSecurityBanner(w io.Writer, report *VulnerabilityReport, maliciousLookup map[string]bool) {
 	hasMalicious := len(maliciousLookup) > 0 || len(report.MaliciousIssues) > 0
 	hasCritical := report.CriticalCount > 0
 	hasFindings := report.TotalIssues > 0
@@ -152,122 +275,312 @@ func generateSecurityBanner(report *VulnerabilityReport, maliciousLookup map[str
 	switch {
 	case hasMalicious:
 		// RED banner for malicious content
-		fmt.Println("![Malicious](https://raw.githubusercontent.com/jmhardison/jfrog-vulnreport/main/images/badge-malicious.png)")
-		fmt.Println("---")
-		fmt.Println()
-		fmt.Println("> [!CAUTION]")
-		fmt.Println("> ## :rotating_light: MALICIOUS EXPLOIT PRESENT :rotating_light:")
-		fmt.Println("> **IMMEDIATE ACTION REQUIRED** - Malicious content detected in this image. Remediate or seek guidance.")
-		fmt.Println("> Policies can prevent the download and execution of this image, resulting in potential deploy issues such as `imagePullBackoff`.")
-		fmt.Println("> Do `not` promote until confirmed, and stop use of image if not a false positive.")
-		fmt.Println()
-		fmt.Println()
-		fmt.Println("---")
-		fmt.Println()
+		_, _ = fmt.Fprintln(w, "![Malicious](https://raw.githubusercontent.com/jmhardison/jfrog-vulnreport/main/images/badge-malicious.png)")
+		_, _ = fmt.Fprintln(w, "---")
+		_, _ = fmt.Fprintln(w)
+		_, _ = fmt.Fprintln(w, "> [!CAUTION]")
+		_, _ = fmt.Fprintln(w, "> ## :rotating_light: MALICIOUS EXPLOIT PRESENT :rotating_light:")
+		_, _ = fmt.Fprintln(w, "> **IMMEDIATE ACTION REQUIRED** - Malicious content detected in this image. Remediate or seek guidance.")
+		_, _ = fmt.Fprintln(w, "> Policies can prevent the download and execution of this image, resulting in potential deploy issues such as `imagePullBackoff`.")
+		_, _ = fmt.Fprintln(w, "> Do `not` promote until confirmed, and stop use of image if not a false positive.")
+		_, _ = fmt.Fprintln(w)
+		_, _ = fmt.Fprintln(w)
+		_, _ = fmt.Fprintln(w, "---")
+		_, _ = fmt.Fprintln(w)
 	case hasCritical:
 		// ORANGE banner for critical CVEs (no malicious)
-		fmt.Println("![Critical CVEs](https://raw.githubusercontent.com/jmhardison/jfrog-vulnreport/main/images/badge-critical-cve.png)")
-		fmt.Println("---")
-		fmt.Println()
-		fmt.Println("> [!CAUTION]")
-		fmt.Println("> ## :red_circle: CRITICAL CVE'S PRESENT")
-		fmt.Println("> Critical severity vulnerabilities found - review and remediation required.")
-		fmt.Println("> Fixable critical issues should be resolved before promotion.")
-		fmt.Println()
-		fmt.Println()
-		fmt.Println("---")
-		fmt.Println()
+		_, _ = fmt.Fprintln(w, "![Critical CVEs](https://raw.githubusercontent.com/jmhardison/jfrog-vulnreport/main/images/badge-critical-cve.png)")
+		_, _ = fmt.Fprintln(w, "---")
+		_, _ = fmt.Fprintln(w)
+		_, _ = fmt.Fprintln(w, "> [!CAUTION]")
+		_, _ = fmt.Fprintln(w, "> ## :red_circle: CRITICAL CVE'S PRESENT")
+		_, _ = fmt.Fprintln(w, "> Critical severity vulnerabilities found - review and remediation required.")
+		_, _ = fmt.Fprintln(w, "> Fixable critical issues should be resolved before promotion.")
+		_, _ = fmt.Fprintln(w)
+		_, _ = fmt.Fprintln(w)
+		_, _ = fmt.Fprintln(w, "---")
+		_, _ = fmt.Fprintln(w)
 	case hasFindings:
 		// YELLOW banner for non-critical CVEs present
-		fmt.Println("![CVEs Present](https://raw.githubusercontent.com/jmhardison/jfrog-vulnreport/main/images/badge-cves-present.png)")
-		fmt.Println("---")
-		fmt.Println()
-		fmt.Println("> [!WARNING]")
-		fmt.Println("> ## :warning: CVE's PRESENT")
-		fmt.Println("> Security vulnerabilities found - review and remediate as needed")
-		fmt.Println("> Promotion won't be blocked, however fixable issues should be resolved before promotion when possible.")
-		fmt.Println()
-		fmt.Println()
-		fmt.Println("---")
-		fmt.Println()
+		_, _ = fmt.Fprintln(w, "![CVEs Present](https://raw.githubusercontent.com/jmhardison/jfrog-vulnreport/main/images/badge-cves-present.png)")
+		_, _ = fmt.Fprintln(w, "---")
+		_, _ = fmt.Fprintln(w)
+		_, _ = fmt.Fprintln(w, "> [!WARNING]")
+		_, _ = fmt.Fprintln(w, "> ## :warning: CVE's PRESENT")
+		_, _ = fmt.Fprintln(w, "> Security vulnerabilities found - review and remediate as needed")
+		_, _ = fmt.Fprintln(w, "> Promotion won't be blocked, however fixable issues should be resolved before promotion when possible.")
+		_, _ = fmt.Fprintln(w)
+		_, _ = fmt.Fprintln(w)
+		_, _ = fmt.Fprintln(w, "---")
+		_, _ = fmt.Fprintln(w)
 	default:
 		// GREEN banner for clean image
-		fmt.Println("![No Findings](https://raw.githubusercontent.com/jmhardison/jfrog-vulnreport/main/images/badge-no-findings.png)")
-		fmt.Println("---")
-		fmt.Println()
-		fmt.Println("> [!NOTE]")
-		fmt.Println("> ## :white_check_mark: NO FINDINGS")
-		fmt.Println("> No security issues found - image appears clean")
-		fmt.Println()
-		fmt.Println()
-		fmt.Println("---")
-		fmt.Println()
+		_, _ = fmt.Fprintln(w, "![No Findings](https://raw.githubusercontent.com/jmhardison/jfrog-vulnreport/main/images/badge-no-findings.png)")
+		_, _ = fmt.Fprintln(w, "---")
+		_, _ = fmt.Fprintln(w)
+		_, _ = fmt.Fprintln(w, "> [!NOTE]")
+		_, _ = fmt.Fprintln(w, "> ## :white_check_mark: NO FINDINGS")
+		_, _ = fmt.Fprintln(w, "> No security issues found - image appears clean")
+		_, _ = fmt.Fprintln(w)
+		_, _ = fmt.Fprintln(w)
+		_, _ = fmt.Fprintln(w, "---")
+		_, _ = fmt.Fprintln(w)
 	}
+}
+
+// outputTableReport renders a human-friendly CLI report using Unicode box-drawing tables.
+// Sections: header, status banner, security summary, malicious findings (when present),
+// security findings table (filtered/sorted), footer. ANSI colors are enabled only when
+// stdout is an interactive terminal.
+func outputTableReport(w io.Writer, report *VulnerabilityReport, maliciousLookup map[string]bool, manifestUrl string, minSeverity string, noFindings bool, appName, appVersion string) error {
+	ew := &errWriter{w: w}
+	colors := colorEnabled()
+
+	// --- Header ---
+	ew.writef("Xray Security Report: %s\n", report.ImageName)
+	if manifestUrl != "" {
+		ew.writeln(manifestUrl)
+	}
+	ew.writeln()
+
+	if report.ImageNotFound {
+		ew.writeln("No Image Found — check the image name/tag, or that publishing is complete.")
+		ew.writeln()
+		ew.writef("Generated by %s %s\n", appName, appVersion)
+		return ew.err
+	}
+
+	// --- Status banner ---
+	hasMalicious := len(report.MaliciousIssues) > 0
+	hasCritical := report.CriticalCount > 0
+	hasFindings := report.TotalIssues > 0
+	switch {
+	case hasMalicious:
+		msg := "MALICIOUS EXPLOIT PRESENT — immediate action required"
+		if colors {
+			msg = text.Colors{text.Bold, text.FgRed}.Sprint(msg)
+		}
+		ew.writef("⚠ STATUS: %s\n\n", msg)
+	case hasCritical:
+		msg := "CRITICAL CVEs PRESENT — review and remediation required"
+		if colors {
+			msg = text.FgRed.Sprint(msg)
+		}
+		ew.writef("⚠ STATUS: %s\n\n", msg)
+	case hasFindings:
+		msg := "CVEs PRESENT — review and remediate as needed"
+		if colors {
+			msg = text.FgYellow.Sprint(msg)
+		}
+		ew.writef("⚠ STATUS: %s\n\n", msg)
+	default:
+		msg := "NO FINDINGS — image appears clean"
+		if colors {
+			msg = text.FgGreen.Sprint(msg)
+		}
+		ew.writef("✓ STATUS: %s\n\n", msg)
+	}
+
+	// --- Security Summary table ---
+	maliciousCount := len(report.MaliciousIssues)
+	fixableCount := 0
+	for _, si := range report.SummaryIssues {
+		if si.Fixable {
+			fixableCount++
+		}
+	}
+	var platformLabels []string
+	for _, p := range report.Platforms {
+		platformLabels = append(platformLabels, p.Platform.OS+"/"+p.Platform.Architecture)
+	}
+
+	ew.writeln("Security Summary")
+	sumT := table.NewWriter()
+	sumT.SetOutputMirror(ew)
+	sumT.SetStyle(table.StyleLight)
+	sumT.Style().Options.SeparateHeader = false
+	sumT.AppendRows([]table.Row{
+		{"Total Findings", report.TotalIssues},
+		{"Critical", report.CriticalCount},
+		{"High", report.HighCount},
+		{"Medium", report.MediumCount},
+		{"Low", report.LowCount},
+		{"Fixable", fixableCount},
+		{"Malicious", maliciousCount},
+		{"Platforms", fmt.Sprintf("%d (%s)", len(report.Platforms), strings.Join(platformLabels, ", "))},
+	})
+	sumT.Render()
+	ew.writeln()
+
+	// --- Malicious Findings table ---
+	if maliciousCount > 0 {
+		sortedMal := make([]string, len(report.MaliciousIssues))
+		copy(sortedMal, report.MaliciousIssues)
+		sort.Strings(sortedMal)
+
+		ew.writef("Malicious Findings (%d)\n", maliciousCount)
+		malT := table.NewWriter()
+		malT.SetOutputMirror(ew)
+		malT.SetStyle(table.StyleLight)
+		malT.AppendHeader(table.Row{"XRAY-ID", "SEVERITY"})
+		for _, id := range sortedMal {
+			malT.AppendRow(table.Row{id, severityColor("Malicious", colors)})
+		}
+		malT.Render()
+		ew.writeln()
+	}
+
+	// --- Security Findings table ---
+	if !noFindings && len(report.SummaryIssues) > 0 {
+		filtered := make([]SummaryIssue, 0, len(report.SummaryIssues))
+		for _, si := range report.SummaryIssues {
+			if severityMeetsMin(si.Severity, minSeverity) {
+				filtered = append(filtered, si)
+			}
+		}
+		sort.Slice(filtered, func(i, j int) bool {
+			ri, rj := severityRank(filtered[i].Severity), severityRank(filtered[j].Severity)
+			if ri != rj {
+				return ri < rj
+			}
+			return filtered[i].IssueID < filtered[j].IssueID
+		})
+
+		if len(filtered) > 0 {
+			fCount := 0
+			for _, si := range filtered {
+				if si.Fixable {
+					fCount++
+				}
+			}
+			ew.writef("Security Findings (%d | %d fixable)\n", len(filtered), fCount)
+			findT := table.NewWriter()
+			findT.SetOutputMirror(ew)
+			findT.SetStyle(table.StyleLight)
+			findT.AppendHeader(table.Row{"XRAY-ID", "SEVERITY", "JFROG SEVERITY", "FIXABLE", "PLATFORMS"})
+			for _, si := range filtered {
+				fixable := "No"
+				if si.Fixable {
+					fixable = "Yes"
+				}
+				jfrogSev := si.JFrogSeverity
+				if jfrogSev == "" {
+					jfrogSev = "-"
+				}
+				platforms := strings.Join(si.Platforms, ", ")
+				if platforms == "" {
+					platforms = "-"
+				}
+				displaySev := si.Severity
+				if maliciousLookup[si.IssueID] {
+					displaySev = "Malicious"
+				}
+				findT.AppendRow(table.Row{
+					si.IssueID,
+					severityColor(displaySev, colors),
+					severityColor(jfrogSev, colors),
+					fixable,
+					platforms,
+				})
+			}
+			findT.Render()
+			ew.writeln()
+		}
+	}
+
+	// --- Footer ---
+	ew.writef("Generated by %s %s at %s\n", appName, appVersion, report.GeneratedAt)
+
+	return ew.err
 }
 
 // outputReport dispatches to the appropriate formatter based on the requested output format.
 // manifestUrl is used by github-md output to render a clickable link to the image's manifest in JFrog Platform UI —
 // no additional API calls needed, just URL construction from server config.
-func outputReport(report *VulnerabilityReport, maliciousLookup map[string]bool, output string, manifestUrl string, minSeverity string, noFindings bool, appName, appVersion string) error {
+func outputReport(w io.Writer, report *VulnerabilityReport, maliciousLookup map[string]bool, output string, manifestUrl string, minSeverity string, noFindings bool, appName, appVersion string) error {
 	switch output {
+	case "table":
+		return outputTableReport(w, report, maliciousLookup, manifestUrl, minSeverity, noFindings, appName, appVersion)
 	case "json":
-		return outputJSONReport(report, maliciousLookup)
+		return outputJSONReport(w, report, maliciousLookup, appName, appVersion)
 	case "github-md":
-		return outputMarkdownReport(report, maliciousLookup, manifestUrl, minSeverity, noFindings, appName, appVersion)
+		return outputMarkdownReport(w, report, maliciousLookup, manifestUrl, minSeverity, noFindings, appName, appVersion)
 	default:
-		return fmt.Errorf("unsupported output format: %s. Use 'json' or 'github-md'", output)
+		return fmt.Errorf("unsupported output format: %s. Use 'table', 'json', or 'github-md'", output)
 	}
 }
 
 // outputJSONReport converts the VulnerabilityReport to an EnhancedVulnerabilityReport (with per-finding
-// malicious status and issue type counts), then prints it as indented JSON to stdout.
-func outputJSONReport(report *VulnerabilityReport, maliciousLookup map[string]bool) error {
+// malicious status and issue type counts), then prints it as indented JSON to w.
+func outputJSONReport(w io.Writer, report *VulnerabilityReport, maliciousLookup map[string]bool, appName, appVersion string) error {
 	// Convert to enhanced format using pre-built malicious lookup (no Events API calls needed).
-	enhanced := convertToEnhancedReport(report, maliciousLookup)
+	enhanced := convertToEnhancedReport(report, maliciousLookup, appName, appVersion)
 
 	jsonData, err := json.MarshalIndent(enhanced, "", "  ")
 	if err != nil {
 		return fmt.Errorf("failed to marshal JSON: %w", err)
 	}
 
-	fmt.Println(string(jsonData))
-	return nil
+	_, err = fmt.Fprintln(w, string(jsonData))
+	return err
 }
 
-// convertToEnhancedReport flattens the per-platform VulnerabilityReport into a single aggregated view.
-// The malicious lookup map (built from Violations API response) is used to annotate each finding with
-// its malicious status — no additional HTTP requests needed.
-func convertToEnhancedReport(report *VulnerabilityReport, maliciousLookup map[string]bool) *EnhancedVulnerabilityReport {
-	typeCount := make(map[string]int)
+// convertToEnhancedReport builds an EnhancedVulnerabilityReport from a VulnerabilityReport.
+// Per-issue detail from SummaryIssues is serialized as the top-level Findings array; malicious
+// status on each finding is resolved from maliciousLookup (built from the Violations API).
+func convertToEnhancedReport(report *VulnerabilityReport, maliciousLookup map[string]bool, appName, appVersion string) *EnhancedVulnerabilityReport {
+	var findings []EnhancedFinding
+	fixableCount := 0
+	for _, si := range report.SummaryIssues {
+		if si.Fixable {
+			fixableCount++
+		}
+		findings = append(findings, EnhancedFinding{
+			IssueID:       si.IssueID,
+			Severity:      si.Severity,
+			JFrogSeverity: si.JFrogSeverity,
+			Fixable:       si.Fixable,
+			Malicious:     maliciousLookup[si.IssueID],
+			Platforms:     si.Platforms,
+		})
+	}
+	sort.Slice(findings, func(i, j int) bool {
+		ri, rj := severityRank(findings[i].Severity), severityRank(findings[j].Severity)
+		if ri != rj {
+			return ri < rj
+		}
+		return findings[i].IssueID < findings[j].IssueID
+	})
 
 	var platforms []EnhancedPlatformInfo
+	for _, p := range report.Platforms {
+		platforms = append(platforms, EnhancedPlatformInfo{Platform: p.Platform})
+	}
 
-	for _, platform := range report.Platforms {
-		enhancedPlatform := EnhancedPlatformInfo{
-			Platform:      platform.Platform,
-			FindingsCount: 0,
-			LayerCount:    platform.LayerCount,
-			SizeMB:        float64(platform.TotalSize) / (1024 * 1024),
-			Findings:      nil,
-		}
-		platforms = append(platforms, enhancedPlatform)
+	var maliciousIssues []string
+	if len(report.MaliciousIssues) > 0 {
+		maliciousIssues = report.MaliciousIssues
 	}
 
 	return &EnhancedVulnerabilityReport{
-		ImageName:     report.ImageName,
-		GeneratedAt:   report.GeneratedAt,
-		ImageNotFound: report.ImageNotFound,
+		ImageName:       report.ImageName,
+		GeneratedAt:     report.GeneratedAt,
+		PluginName:      appName,
+		PluginVersion:   appVersion,
+		ImageNotFound:   report.ImageNotFound,
+		MaliciousIssues: maliciousIssues,
 		Summary: SecuritySummary{
 			TotalFindings:  report.TotalIssues,
 			CriticalCount:  report.CriticalCount,
 			HighCount:      report.HighCount,
 			MediumCount:    report.MediumCount,
 			LowCount:       report.LowCount,
+			FixableCount:   fixableCount,
 			MaliciousCount: len(maliciousLookup),
 			PlatformCount:  len(report.Platforms),
 		},
-		IssueTypes: typeCount,
-		Platforms:  platforms,
+		Platforms: platforms,
+		Findings:  findings,
 	}
 }
 
@@ -275,65 +588,67 @@ func convertToEnhancedReport(report *VulnerabilityReport, maliciousLookup map[st
 // lookup map (no Events API calls) for per-finding malicious status and summary counts. The manifestUrl
 // parameter is used to render a clickable link to the image's manifest in JFrog Platform UI —
 // constructed as <baseUrl>/ui/repos/tree/General/<repo>/<path>/list.manifest.json without additional HTTP requests.
-func outputMarkdownReport(report *VulnerabilityReport, maliciousLookup map[string]bool, manifestUrl string, minSeverity string, noFindings bool, appName, appVersion string) error {
+func outputMarkdownReport(w io.Writer, report *VulnerabilityReport, maliciousLookup map[string]bool, manifestUrl string, minSeverity string, noFindings bool, appName, appVersion string) error {
+	ew := &errWriter{w: w}
+
 	if report.ImageNotFound {
-		fmt.Println("![No Image Found](https://raw.githubusercontent.com/jmhardison/jfrog-vulnreport/main/images/badge-no-image-found.png)")
-		fmt.Println("---")
-		fmt.Println()
-		fmt.Printf("# Xray Security Report\n\n")
-		fmt.Printf("## %s\n\n", report.ImageName)
-		fmt.Println("No Image Found - Check the image name/tag, or that publishing is complete.")
-		fmt.Println()
-		fmt.Printf("> Generated by %s %s\n", appName, appVersion)
-		fmt.Println()
-		return nil
+		ew.writeln("![No Image Found](https://raw.githubusercontent.com/jmhardison/jfrog-vulnreport/main/images/badge-no-image-found.png)")
+		ew.writeln("---")
+		ew.writeln()
+		ew.writef("# Xray Security Report\n\n")
+		ew.writef("## %s\n\n", report.ImageName)
+		ew.writeln("No Image Found - Check the image name/tag, or that publishing is complete.")
+		ew.writeln()
+		ew.writef("> Generated by %s %s\n", appName, appVersion)
+		ew.writeln()
+		return ew.err
 	}
 
-	generateSecurityBanner(report, maliciousLookup)
+	generateSecurityBanner(ew, report, maliciousLookup)
 
-	fmt.Printf("# Xray Security Report\n\n")
-	fmt.Printf("## %s\n\n", report.ImageName)
+	ew.writef("# Xray Security Report\n\n")
+	ew.writef("## %s\n\n", report.ImageName)
 
 	if manifestUrl != "" {
-		fmt.Printf("> **View manifest:** [%s](%s)\n\n", report.ImageName, manifestUrl)
+		ew.writef("> **View manifest:** [%s](%s)\n\n", report.ImageName, manifestUrl)
 	}
 
-	fmt.Println()
+	ew.writeln()
 
-	fmt.Println("## Security Summary")
+	ew.writeln("## Security Summary")
 
 	maliciousCount := len(report.MaliciousIssues)
-	fmt.Printf("- **Total Findings:** %d\n", report.TotalIssues)
-	fmt.Printf("- **Critical:** %d | **High:** %d | **Medium:** %d | **Low:** %d\n",
+	ew.writef("- **Total Findings:** %d\n", report.TotalIssues)
+	ew.writef("- **Critical:** %d | **High:** %d | **Medium:** %d | **Low:** %d\n",
 		report.CriticalCount, report.HighCount, report.MediumCount, report.LowCount)
-	fmt.Printf("- **Malicious:** %d\n", maliciousCount)
-	fmt.Printf("- **Platforms Scanned:** %d\n", len(report.Platforms))
+	ew.writef("- **Malicious:** %d\n", maliciousCount)
+	ew.writef("- **Platforms Scanned:** %d\n", len(report.Platforms))
 	if len(report.Platforms) > 0 {
 		var platformList []string
 		for _, p := range report.Platforms {
 			platformList = append(platformList, fmt.Sprintf("%s/%s", p.Platform.OS, p.Platform.Architecture))
 		}
-		fmt.Printf("- **Platforms:** %s\n\n", strings.Join(platformList, ", "))
+		ew.writef("- **Platforms:** %s\n\n", strings.Join(platformList, ", "))
 	} else {
-		fmt.Println()
+		ew.writeln()
 	}
 
 	if maliciousCount > 0 {
-		fmt.Println()
-		fmt.Println("---")
-		fmt.Println()
-		fmt.Printf("## :bangbang: Malicious Findings (%d)\n", maliciousCount)
-		fmt.Println("| Xray ID | Severity |")
-		fmt.Println("|---------|----------|")
+		ew.writeln()
+		ew.writeln("---")
+		ew.writeln()
+		ew.writef("## :bangbang: Malicious Findings (%d)\n", maliciousCount)
+		ew.writeln("| Xray ID | Severity |")
+		ew.writeln("|---------|----------|")
 		sortedMal := make([]string, len(report.MaliciousIssues))
 		copy(sortedMal, report.MaliciousIssues)
 		sort.Strings(sortedMal)
 		for _, id := range sortedMal {
-			fmt.Printf("| %s | %s |\n", id, severityLabel("Malicious"))
+			ew.writef("| %s | %s |\n", id, severityLabel("Malicious"))
 		}
-		fmt.Println()
-		fmt.Println("---")
-		fmt.Println()
+		ew.writeln()
+		ew.writeln("---")
+		ew.writeln()
 	}
 
 	// Security findings table — collapsible, filtered by minSeverity, sorted Critical→Low then XRAY-ID.
@@ -358,12 +673,12 @@ func outputMarkdownReport(report *VulnerabilityReport, maliciousLookup map[strin
 					fixableCount++
 				}
 			}
-			fmt.Println()
-			fmt.Println("---")
-			fmt.Println()
-			fmt.Printf("<details>\n<summary>Security Findings (%d | %d fixable) — click to expand</summary>\n\n", len(filtered), fixableCount)
-			fmt.Println("| XRAY-ID | SEVERITY | JFROG SEVERITY | FIXABLE | PLATFORMS |")
-			fmt.Println("|---------|----------|----------------|---------|-----------|")
+			ew.writeln()
+			ew.writeln("---")
+			ew.writeln()
+			ew.writef("<details>\n<summary>Security Findings (%d | %d fixable) — click to expand</summary>\n\n", len(filtered), fixableCount)
+			ew.writeln("| XRAY-ID | SEVERITY | JFROG SEVERITY | FIXABLE | PLATFORMS |")
+			ew.writeln("|---------|----------|----------------|---------|-----------|")
 			for _, si := range filtered {
 				fixable := "No"
 				if si.Fixable {
@@ -373,7 +688,7 @@ func outputMarkdownReport(report *VulnerabilityReport, maliciousLookup map[strin
 				if platformsStr == "" {
 					platformsStr = "-"
 				}
-				fmt.Printf("| %s | %s | %s | %s | %s |\n",
+				ew.writef("| %s | %s | %s | %s | %s |\n",
 					si.IssueID,
 					severityLabel(si.Severity),
 					jfrogSeverityLabel(si.JFrogSeverity, si.Severity),
@@ -381,20 +696,19 @@ func outputMarkdownReport(report *VulnerabilityReport, maliciousLookup map[strin
 					platformsStr,
 				)
 			}
-			fmt.Println()
-			fmt.Println("</details>")
-			fmt.Println()
+			ew.writeln()
+			ew.writeln("</details>")
+			ew.writeln()
 		}
 	}
 
-	fmt.Println("---")
-	fmt.Println()
-	fmt.Printf("> Xray scans trigger at upload time, but can be matched to new vulnerabilities over time without rescans.\n> These are findings as of %s.\n", report.GeneratedAt)
-	fmt.Println()
-	fmt.Printf("> Generated by %s %s\n", appName, appVersion)
-	fmt.Println()
+	ew.writeln("---")
+	ew.writeln()
+	ew.writef("> Xray scans trigger at upload time, but can be matched to new vulnerabilities over time without rescans.\n> These are findings as of %s.\n", report.GeneratedAt)
+	ew.writef("> Generated by %s %s\n", appName, appVersion)
+	ew.writeln()
 
-	return nil
+	return ew.err
 }
 
 // severityLabel returns an emoji-prefixed severity label for GitHub Markdown table cells.
@@ -466,24 +780,36 @@ func severityMeetsMin(severity, minSeverity string) bool {
 	return r <= minRank
 }
 
-// ParseImageName splits a full image reference (e.g., "docker-local/myimage:latest") into its
-// repository key, image name, and tag components. Used as the first step in artifact discovery.
-func ParseImageName(imageName string) (string, string, string, error) {
+// ParseImageName splits an image reference into repository key, image name, and tag.
+// Accepts "repo/image:tag" (repo from the argument) or "image:tag" (repo from defaultRepo).
+// When the argument contains a slash before the first colon, the first segment is always the repo.
+func ParseImageName(imageName, defaultRepo string) (string, string, string, error) {
 	trimmed := strings.TrimSpace(imageName)
 	if trimmed == "" {
-		return "", "", "", fmt.Errorf("invalid image format, expected: repo/image:tag")
+		return "", "", "", fmt.Errorf("invalid image format, expected: image:tag")
 	}
 
-	parts := strings.SplitN(trimmed, "/", 2)
-	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
-		return "", "", "", fmt.Errorf("invalid image format, expected: repo/image:tag")
+	if defaultRepo == "" {
+		defaultRepo = "docker-local"
 	}
 
-	repoKey := parts[0]
-	imageAndTag := parts[1]
+	firstSlash := strings.Index(trimmed, "/")
+	firstColon := strings.Index(trimmed, ":")
+
+	var repoKey, imageAndTag string
+	if firstSlash >= 0 && (firstColon < 0 || firstSlash < firstColon) {
+		// Slash appears before any colon → first segment is the repo key.
+		repoKey = trimmed[:firstSlash]
+		imageAndTag = trimmed[firstSlash+1:]
+	} else {
+		// No slash, or slash comes after the colon → treat whole string as image:tag.
+		repoKey = defaultRepo
+		imageAndTag = trimmed
+	}
+
 	tagSeparator := strings.LastIndex(imageAndTag, ":")
 	if tagSeparator <= 0 || tagSeparator == len(imageAndTag)-1 {
-		return "", "", "", fmt.Errorf("invalid image format, expected: repo/image:tag")
+		return "", "", "", fmt.Errorf("invalid image format, expected: image:tag")
 	}
 
 	image := imageAndTag[:tagSeparator]
@@ -551,9 +877,7 @@ func newArtifactoryService(serverDetails *configCore.ServerDetails) (*Artifactor
 // Returns the populated VulnerabilityReport and the maliciousLookup map (issue ID → true).
 // SummaryIssues carries per-finding detail used by both JSON and markdown formatters.
 func generateVulnerabilityReport(conf *CheckConfiguration, repoKey, imageName, tag string, xraySvc *XrayService, artSvc *ArtifactoryService) (*VulnerabilityReport, map[string]bool, error) {
-	if !conf.Silent {
-		log.Info(fmt.Sprintf("Generating vulnerability report for %s/%s:%s", repoKey, imageName, tag))
-	}
+	log.Debug(fmt.Sprintf("Generating vulnerability report for %s/%s:%s", repoKey, imageName, tag))
 
 	report := &VulnerabilityReport{
 		ImageName:   fmt.Sprintf("%s/%s:%s", repoKey, imageName, tag),
@@ -562,25 +886,19 @@ func generateVulnerabilityReport(conf *CheckConfiguration, repoKey, imageName, t
 	}
 
 	// Step 1: Dual-path discovery (handles both single-platform and multi-platform images)
-	if !conf.Silent {
-		log.Info("Running dual-path manifest discovery...")
-	}
+	log.Debug("Running dual-path manifest discovery...")
 	platformPaths, err := discoverImageArtifacts(artSvc, repoKey, imageName, tag)
 	if err != nil {
 		return nil, nil, fmt.Errorf("manifest discovery failed: %w", err)
 	}
 
 	if len(platformPaths) == 0 {
-		if !conf.Silent {
-			log.Warn("No artifacts discovered — image may not be indexed in Xray or may use an unexpected path format")
-		}
+		log.Warn("No artifacts discovered — image may not be indexed in Xray or may use an unexpected path format")
 		report.ImageNotFound = true
 		return report, map[string]bool{}, nil
 	}
 
-	if !conf.Silent {
-		log.Info(fmt.Sprintf("Discovered %d artifact path(s) for vulnerabilities", len(platformPaths)))
-	}
+	log.Debug(fmt.Sprintf("Discovered %d artifact path(s) for vulnerabilities", len(platformPaths)))
 
 	// Step 2: Apply platform filtering if specified.
 	// --platform accepts "os/arch" (e.g., "linux/amd64") or OS only (e.g., "linux").
@@ -594,15 +912,11 @@ func generateVulnerabilityReport(conf *CheckConfiguration, repoKey, imageName, t
 		}
 		filtered := FilterManifestsByPlatform(platformPaths, arch, osFilter)
 		if len(filtered) == 0 {
-			if !conf.Silent {
-				log.Warn(fmt.Sprintf("No platforms match filter (arch=%q, os=%q)", arch, osFilter))
-			}
+			log.Warn(fmt.Sprintf("No platforms match filter (arch=%q, os=%q)", arch, osFilter))
 			return report, map[string]bool{}, nil
 		}
 		platformPaths = filtered
-		if !conf.Silent {
-			log.Info(fmt.Sprintf("After platform filtering: %d path(s) remaining", len(platformPaths)))
-		}
+		log.Debug(fmt.Sprintf("After platform filtering: %d path(s) remaining", len(platformPaths)))
 	}
 
 	if len(platformPaths) > 0 && platformPaths[0].isList {
@@ -614,9 +928,7 @@ func generateVulnerabilityReport(conf *CheckConfiguration, repoKey, imageName, t
 	// --malicious-watch-name watch as the source of truth.
 	maliciousLookup := make(map[string]bool)
 
-	if !conf.Silent {
-		log.Info(fmt.Sprintf("Resolving malicious issue IDs from watch: %s", conf.MaliciousWatchName))
-	}
+	log.Debug(fmt.Sprintf("Resolving malicious issue IDs from watch: %s", conf.MaliciousWatchName))
 
 	violationsErrCount := 0
 	for _, dp := range platformPaths {
@@ -661,7 +973,7 @@ func generateVulnerabilityReport(conf *CheckConfiguration, repoKey, imageName, t
 		// Per-platform sha256__ paths may not be indexed separately by Xray for multi-platform images.
 		// Fall back to the top-level list.manifest.json path for combined counts.
 		// Platform attribution is then set to all detected platforms for every finding.
-		log.Info("Per-platform v2 query returned 0 results; falling back to list.manifest.json")
+		log.Debug("Per-platform v2 query returned 0 results; falling back to list.manifest.json")
 		listPath := conf.ProjectKey + "/" + repoKey + "/" + imageName + "/" + tag + "/list.manifest.json"
 		counts, issues, err = xraySvc.GetSummaryV2([]string{listPath}, nil)
 		if err != nil {

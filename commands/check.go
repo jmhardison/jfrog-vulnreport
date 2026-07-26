@@ -16,17 +16,19 @@ type CheckCommand struct {
 	artSvc  *helperinternal.ArtifactoryService
 
 	// Flag values — set by fluent setters from main.go Action callback.
-	Image            string // Full image reference (e.g., "docker-local/myimage:latest")
+	Image            string // Image reference (e.g., "myimage:latest" or "docker-local/myimage:latest")
+	Repo             string // Artifactory repository key passed to ParseImageName; defaults to "docker-local" when empty
 	ServerId         string // JFrog CLI server configuration ID
 	Platform         string // Platform filter: "os/arch" (e.g., "linux/amd64") or OS only (e.g., "linux")
 	FailOnVuln       bool   // Exit non-zero if any vulnerabilities found
 	Output           string // Output format: "json" or "github-md"
 	MinSeverity      string // Minimum severity to display: Low, Medium, High, Critical, Malicious
-	DebugPaths       bool   // Log artifact discovery paths for troubleshooting
+	Debug            bool   // Enable debug-level logging
 	DockerRegistryURL string // Override URL for Docker registry (for direct manifest fetch)
 	ProjectKey       string // Xray project key for violation queries (defaults to "default")
 	MaliciousWatchName string // Xray watch that defines malicious packages (source of truth)
 	NoFindings         bool   // Suppress Security Findings table in output
+	SaveOutput         string // Comma-separated formats to save to files: "json" and/or "github-md"
 	AppName            string // Plugin name passed from main.go for footer rendering
 	AppVersion         string // Plugin version passed from main.go for footer rendering
 }
@@ -52,16 +54,18 @@ func (c *CheckCommand) SetArtifactoryService(svc *helperinternal.ArtifactoryServ
 
 // Fluent setters for flag values — each returns *CheckCommand for chaining.
 func (c *CheckCommand) SetImage(v string) *CheckCommand          { c.Image = v; return c }
+func (c *CheckCommand) SetRepo(v string) *CheckCommand           { c.Repo = v; return c }
 func (c *CheckCommand) SetServerId(v string) *CheckCommand       { c.ServerId = v; return c }
 func (c *CheckCommand) SetPlatform(v string) *CheckCommand       { c.Platform = v; return c }
 func (c *CheckCommand) SetFailOnVuln(v bool) *CheckCommand       { c.FailOnVuln = v; return c }
 func (c *CheckCommand) SetOutput(v string) *CheckCommand         { c.Output = v; return c }
 func (c *CheckCommand) SetMinSeverity(v string) *CheckCommand    { c.MinSeverity = v; return c }
-func (c *CheckCommand) SetDebugPaths(v bool) *CheckCommand       { c.DebugPaths = v; return c }
+func (c *CheckCommand) SetDebug(v bool) *CheckCommand            { c.Debug = v; return c }
 func (c *CheckCommand) SetDockerRegistryURL(v string) *CheckCommand { c.DockerRegistryURL = v; return c }
 func (c *CheckCommand) SetProjectKey(v string) *CheckCommand     { c.ProjectKey = v; return c }
 func (c *CheckCommand) SetMaliciousWatchName(v string) *CheckCommand { c.MaliciousWatchName = v; return c }
 func (c *CheckCommand) SetNoFindings(v bool) *CheckCommand           { c.NoFindings = v; return c }
+func (c *CheckCommand) SetSaveOutput(v string) *CheckCommand         { c.SaveOutput = v; return c }
 func (c *CheckCommand) SetAppName(v string) *CheckCommand            { c.AppName = v; return c }
 func (c *CheckCommand) SetAppVersion(v string) *CheckCommand         { c.AppVersion = v; return c }
 
@@ -76,7 +80,7 @@ func (c *CheckCommand) Exec() error {
 		}
 		output := c.Output
 		if output == "" {
-			output = "json"
+			output = "table"
 		}
 		projectKey := c.ProjectKey
 		if projectKey == "" {
@@ -90,15 +94,16 @@ func (c *CheckCommand) Exec() error {
 			Output:             output,
 			Silent:             output == "github-md",
 			MinSeverity:        c.MinSeverity,
-			DebugPaths:         c.DebugPaths,
+			Debug:              c.Debug,
 			DockerRegistryURL:  c.DockerRegistryURL,
 			ProjectKey:         projectKey,
 			MaliciousWatchName: c.MaliciousWatchName,
 			NoFindings:         c.NoFindings,
+			SaveOutput:         c.SaveOutput,
 			AppName:            c.AppName,
 			AppVersion:         c.AppVersion,
 		}
-		repoKey, imageName, tag, err := helperinternal.ParseImageName(conf.ImageName)
+		repoKey, imageName, tag, err := helperinternal.ParseImageName(conf.ImageName, c.Repo)
 		if err != nil {
 			return fmt.Errorf("invalid image format: %w", err)
 		}
@@ -107,6 +112,9 @@ func (c *CheckCommand) Exec() error {
 
 	// Normal CLI path: build a components.Context and delegate to RunCheckCommand.
 	ctx := &components.Context{Arguments: []string{c.Image}}
+	if c.Repo != "" {
+		ctx.AddStringFlag("repo", c.Repo)
+	}
 	if c.ServerId != "" {
 		ctx.AddStringFlag("server-id", c.ServerId)
 	}
@@ -120,7 +128,7 @@ func (c *CheckCommand) Exec() error {
 	if c.MinSeverity != "" {
 		ctx.AddStringFlag("min-severity", c.MinSeverity)
 	}
-	ctx.AddBoolFlag("debug-paths", c.DebugPaths)
+	ctx.AddBoolFlag("debug", c.Debug)
 	if c.DockerRegistryURL != "" {
 		ctx.AddStringFlag("docker-registry-url", c.DockerRegistryURL)
 	}
@@ -131,6 +139,9 @@ func (c *CheckCommand) Exec() error {
 		ctx.AddStringFlag("malicious-watch-name", c.MaliciousWatchName)
 	}
 	ctx.AddBoolFlag("no-findings", c.NoFindings)
+	if c.SaveOutput != "" {
+		ctx.AddStringFlag("save-output", c.SaveOutput)
+	}
 
 	return helperinternal.RunCheckCommand(ctx, c.AppName, c.AppVersion)
 }
@@ -159,21 +170,23 @@ func checkCmd(c *components.Context, appName, appVersion string) error {
 
 	output := c.GetStringFlagValue("output")
 	if output == "" {
-		output = "json" // Default to JSON
+		output = "table"
 	}
 
 	cmd := NewCheckCommand().
 		SetImage(c.Arguments[0]).
+		SetRepo(c.GetStringFlagValue("repo")).
 		SetServerId(c.GetStringFlagValue("server-id")).
 		SetPlatform(c.GetStringFlagValue("platform")).
 		SetFailOnVuln(c.GetBoolFlagValue("fail-on-vuln")).
 		SetOutput(output).
 		SetMinSeverity(c.GetStringFlagValue("min-severity")).
-		SetDebugPaths(c.GetBoolFlagValue("debug-paths")).
+		SetDebug(c.GetBoolFlagValue("debug")).
 		SetDockerRegistryURL(c.GetStringFlagValue("docker-registry-url")).
 		SetProjectKey(c.GetStringFlagValue("project-key")).
 		SetMaliciousWatchName(c.GetStringFlagValue("malicious-watch-name")).
 		SetNoFindings(c.GetBoolFlagValue("no-findings")).
+		SetSaveOutput(c.GetStringFlagValue("save-output")).
 		SetAppName(appName).
 		SetAppVersion(appVersion)
 
@@ -184,13 +197,17 @@ func getCheckArguments() []components.Argument {
 	return []components.Argument{
 		{
 			Name:        "image",
-			Description: "The Docker image name and tag (e.g., myrepo/myimage:tag).",
+			Description: "The Docker image name and tag (e.g., myimage:tag or repo/myimage:tag). If the repo is omitted, --repo is used.",
 		},
 	}
 }
 
 func getCheckFlags() []components.Flag {
 	return []components.Flag{
+		components.NewStringFlag(
+			"repo",
+			"Artifactory repository key containing the Docker image. Defaults to 'docker-local'.",
+		),
 		components.NewStringFlag(
 			"server-id",
 			"JFrog server configuration ID to use.",
@@ -206,15 +223,15 @@ func getCheckFlags() []components.Flag {
 		),
 		components.NewStringFlag(
 			"output",
-			"Output format: json (default), github-md (silent markdown for GitHub).",
+			"Output format: table (default), json, github-md (silent markdown for CI).",
 		),
 		components.NewStringFlag(
 			"min-severity",
 			"Minimum severity level to display in findings (Low, Medium, High, Critical, Malicious). Summary shows all severities.",
 		),
 		components.NewBoolFlag(
-			"debug-paths",
-			"Enable debug mode to explore repository structure.",
+			"debug",
+			"Enable debug-level logging for troubleshooting.",
 			components.WithBoolDefaultValue(false),
 		),
 		components.NewStringFlag(
@@ -233,6 +250,10 @@ func getCheckFlags() []components.Flag {
 			"no-findings",
 			"Suppress the Security Findings table in output. Summary counts and malicious findings are still shown.",
 			components.WithBoolDefaultValue(false),
+		),
+		components.NewStringFlag(
+			"save-output",
+			"Comma-separated formats to save to files instead of stdout: 'json' (→ vulnreport.json) and/or 'github-md' (→ vulnreport.md).",
 		),
 	}
 }

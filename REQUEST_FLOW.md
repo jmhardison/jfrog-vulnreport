@@ -3,8 +3,12 @@
 This document describes what happens, in order, when you run:
 
 ```
+jf vulnreport check <image>:<tag> --malicious-watch-name <mw>
+# or
 jf vulnreport check <repo>/<image>:<tag> --malicious-watch-name <mw>
 ```
+
+The `--repo` flag (default: `docker-local`) supplies the Artifactory repository key when the image argument does not include a repo prefix. If the argument already contains a slash before the first colon, its leading segment is used as the repo and `--repo` is ignored.
 
 ---
 
@@ -25,7 +29,11 @@ There are two distinct JFrog systems involved:
 
 **File:** `main.go` → `commands/check.go`
 
-The JFrog CLI framework receives the command and routes it to `checkCmd()`, which reads every flag into a `CheckCommand` struct (image name, server ID, watch names, output format, platform filter, etc.) and calls `Exec()`.
+The JFrog CLI framework receives the command and routes it to `checkCmd()`, which reads every flag into a `CheckCommand` struct (image name, repo, server ID, watch names, output format, platform filter, etc.) and calls `Exec()`.
+
+Before any API calls, `ParseImageName()` resolves the repository key and image path from the argument:
+- `repo/image:tag` — the leading segment before the first slash is the repo key; the remainder is `image:tag`.
+- `image:tag` (no slash before the colon) — the `--repo` flag value is used as the repo key (`docker-local` by default).
 
 `Exec()` has two paths:
 
@@ -103,7 +111,7 @@ Result: a slice of `dockerPath` structs, one per platform to query.
 
 **File:** `internal/docker_paths.go` — `FilterManifestsByPlatform()`
 
-If `--platform linux/amd64` or `--os linux` was passed, the discovered platform paths are filtered here. Only the matching platform's manifest path(s) are kept. If nothing matches, the function returns early with an empty report.
+If `--platform linux/amd64` or `--platform linux` was passed, the discovered platform paths are filtered here. Only the matching platform's manifest path(s) are kept. If nothing matches, the function returns early with an empty report.
 
 A single word (e.g. `--platform linux`) is treated as OS only, not architecture.
 
@@ -132,7 +140,7 @@ The response is paginated. All pages are fetched until `total_violations` is rea
 
 Every `issue_id` returned by this watch is stored in a `maliciousLookup` map (`map[string]bool`). This map is the authoritative source of truth for which issues are malicious — the Violations API's own `malicious_package` field is considered unreliable, so this dedicated watch approach is used instead.
 
-This query runs unconditionally regardless of whether `--watch-name` was provided.
+This query runs unconditionally for every image.
 
 ---
 
@@ -189,16 +197,31 @@ If the v2 API call fails, a warning is logged and all counts default to zero. No
 
 **File:** `internal/check_runner.go` — `outputReport()`
 
-After `generateVulnerabilityReport()` returns, a UI manifest link is constructed (pointing to the image in the JFrog Platform web UI), then the report is formatted.
+After `generateVulnerabilityReport()` returns, a UI manifest link is constructed (pointing to the image in the JFrog Platform web UI), then the report is formatted. `setLogLevel()` is called before any output: DEBUG when `--debug` is set, WARN by default (table/json), ERROR for `github-md`.
+
+### Table output (`--output table`, default)
+
+`outputTableReport()` renders Unicode box-drawing tables to stdout using `github.com/jedib0t/go-pretty/v6/table` with `table.StyleLight`. Sections in order:
+1. Header — image name and manifest link
+2. Status line — highest-severity state (malicious → critical → CVEs → clean)
+3. Security Summary table — two-column key/value table with total, critical, high, medium, low, fixable, malicious, and platform count
+4. Malicious Findings table — XRAY-ID + severity, only when `MaliciousIssues` is non-empty
+5. Security Findings table — XRAY-ID, severity, JFrog severity, fixable, platforms; filtered by `--min-severity`; omitted when `--no-findings` is set
+6. Footer — version and timestamp
+
+ANSI severity colors are applied when stdout is a TTY (detected via `golang.org/x/term.IsTerminal`). Colors are omitted when output is piped.
 
 ### JSON output (`--output json`)
 
-`outputJSONReport()` calls `convertToEnhancedReport()` which:
-- Flattens all per-platform vulnerabilities into a single list (always empty — Vulnerabilities is nil after Phase 5 removal)
-- Counts issue types and malicious findings using `maliciousLookup`
-- Produces summary counts from the Phase 4 summary API
+`outputJSONReport()` calls `convertToEnhancedReport()` which builds an `EnhancedVulnerabilityReport` with:
+- `pluginName` — plugin binary name (`vulnreport`); enables downstream tooling to identify the report generator
+- `pluginVersion` — plugin version string (e.g. `v0.1.10`); enables tracking which version generated the report
+- `summary` — aggregate counts (total, critical/high/medium/low, fixable, malicious, platform count); fixable count comes from `SummaryIssue.Fixable` across all findings
+- `maliciousIssues` — list of XRAY IDs returned by the malicious watch (omitted when empty)
+- `platforms` — list of platform OS/arch objects discovered for the image
+- `findings` — per-issue detail from `SummaryIssues` (Phase 4): `issueId`, `severity`, `jfrogSeverity` (omitted when empty), `fixable`, `malicious` (true when present in `maliciousLookup`), `platforms` (which platforms the finding appeared on). Sorted Critical→Low then XRAY-ID ascending. Omitted when empty.
 
-The result is a single `EnhancedVulnerabilityReport` struct printed as indented JSON to stdout.
+The result is printed as indented JSON to stdout.
 
 ### GitHub Markdown output (`--output github-md`)
 
@@ -216,6 +239,16 @@ The result is a single `EnhancedVulnerabilityReport` struct printed as indented 
 
 In GitHub Markdown mode, all log output is suppressed (log level set to ERROR) so only the markdown goes to stdout — this makes it safe to pipe directly into a CI pipeline step.
 
+### File output (`--save-output json,github-md`)
+
+When `--save-output` is set, `saveOutputToFiles()` is called **instead of** `outputReport()`. It:
+1. Splits the value on commas and trims whitespace around each format name.
+2. For `json`: creates `vulnreport.json` in the CWD and calls `outputJSONReport(f, ...)`.
+3. For `github-md`: creates `vulnreport.md` in the CWD and calls `outputMarkdownReport(f, ...)`.
+4. Prints `Saved: vulnreport.json, vulnreport.md` (or whichever files were written) to stdout — no report body appears on the terminal.
+
+JFrog APIs are queried once; both files are formatted from the same in-memory result. The `--fail-on-vuln` check still runs after file writing, so a non-zero exit and the saved files are produced together when both flags are set.
+
 ---
 
 ## 5. Exit Behavior
@@ -227,13 +260,14 @@ If `--fail-on-vuln` is set and `report.TotalIssues > 0`, the command returns a n
 ## Call Stack Summary
 
 ```
-jf vulnreport check <image> [flags]
+jf vulnreport check <image> [--repo <repo>] [flags]
 └── checkCmd()                             commands/check.go
     └── CheckCommand.Exec()                commands/check.go
         └── RunCheckCommand()              internal/check_runner.go
-            ├── getServerDetails()         → JFrog CLI framework (token exchange)
-            ├── newXrayService()           → authenticated Xray HTTP client
-            ├── newArtifactoryService()    → authenticated Artifactory HTTP client
+            ├── ParseImageName(image, repo)  → resolves repoKey / imageName / tag
+            ├── getServerDetails()           → JFrog CLI framework (token exchange)
+            ├── newXrayService()             → authenticated Xray HTTP client
+            ├── newArtifactoryService()      → authenticated Artifactory HTTP client
             └── RunCheckCommandFromConf()  internal/check_runner.go
                 └── generateVulnerabilityReport()
                     ├── discoverImageArtifacts()           internal/docker_paths.go
@@ -247,7 +281,11 @@ jf vulnreport check <image> [flags]
                     │   └── POST /api/v1/violations        → Xray  (builds maliciousLookup)
                     ├── xraySvc.GetSummaryV2()             internal/xray_sdk.go
                     │   └── POST /api/v2/summary/artifact  → Xray  (severity counts + per-issue detail)
-                └── outputReport()
+                ├── saveOutputToFiles()    [when --save-output is set]
+            │   ├── outputJSONReport()   → vulnreport.json
+            │   └── outputMarkdownReport() → vulnreport.md
+            └── outputReport()         [default — writes to stdout]
+                    ├── outputTableReport()                internal/check_runner.go
                     ├── outputJSONReport()                 internal/check_runner.go
                     │   └── convertToEnhancedReport()
                     └── outputMarkdownReport()             internal/check_runner.go

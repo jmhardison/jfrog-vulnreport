@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -21,6 +22,7 @@ func TestParseImageName(t *testing.T) {
 	tests := []struct {
 		name          string
 		fullImageName string
+		defaultRepo   string
 		expectedRepo  string
 		expectedImage string
 		expectedTag   string
@@ -29,39 +31,68 @@ func TestParseImageName(t *testing.T) {
 		{
 			name:          "Valid image with single repository",
 			fullImageName: "docker-local/myapp:latest",
+			defaultRepo:   "",
 			expectedRepo:  "docker-local",
 			expectedImage: "myapp",
 			expectedTag:   "latest",
-			expectError:   false,
 		},
 		{
 			name:          "Valid image with nested path",
 			fullImageName: "docker-local/team/myapp:v1.2.3",
+			defaultRepo:   "",
 			expectedRepo:  "docker-local",
 			expectedImage: "team/myapp",
 			expectedTag:   "v1.2.3",
-			expectError:   false,
+		},
+		{
+			name:          "Image without repo prefix uses defaultRepo",
+			fullImageName: "myapp:latest",
+			defaultRepo:   "docker-local",
+			expectedRepo:  "docker-local",
+			expectedImage: "myapp",
+			expectedTag:   "latest",
+		},
+		{
+			name:          "Image without repo prefix uses custom defaultRepo",
+			fullImageName: "myapp:v2.0",
+			defaultRepo:   "my-repo",
+			expectedRepo:  "my-repo",
+			expectedImage: "myapp",
+			expectedTag:   "v2.0",
+		},
+		{
+			name:          "Repo in image arg overrides defaultRepo",
+			fullImageName: "docker-local/myapp:latest",
+			defaultRepo:   "other-repo",
+			expectedRepo:  "docker-local",
+			expectedImage: "myapp",
+			expectedTag:   "latest",
 		},
 		{
 			name:          "Invalid format - missing tag",
 			fullImageName: "docker-local/myapp",
+			defaultRepo:   "",
 			expectError:   true,
 		},
 		{
-			name:          "Invalid format - missing repository",
+			name:          "Image without prefix and empty defaultRepo falls back to docker-local",
 			fullImageName: "myapp:latest",
-			expectError:   true,
+			defaultRepo:   "",
+			expectedRepo:  "docker-local",
+			expectedImage: "myapp",
+			expectedTag:   "latest",
 		},
 		{
 			name:          "Invalid format - empty string",
 			fullImageName: "",
+			defaultRepo:   "docker-local",
 			expectError:   true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			repo, image, tag, err := ParseImageName(tt.fullImageName)
+			repo, image, tag, err := ParseImageName(tt.fullImageName, tt.defaultRepo)
 
 			if tt.expectError {
 				assert.Error(t, err)
@@ -294,7 +325,7 @@ func TestGithubMDOutputNoLogLeakage(t *testing.T) {
 	output := buf.String()
 
 	// Every line must be markdown or blank — no log timestamp prefix.
-	for _, line := range strings.Split(output, "\n") {
+	for line := range strings.SplitSeq(output, "\n") {
 		if line == "" {
 			continue
 		}
@@ -302,6 +333,148 @@ func TestGithubMDOutputNoLogLeakage(t *testing.T) {
 		assert.NotRegexp(t, `^\d{2}:\d{2}:\d{2}`, line,
 			"log line leaked into github-md stdout: %q", line)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// End-to-end pipeline smoke tests — JSON and github-md output paths
+// ---------------------------------------------------------------------------
+
+// endToEndMockServer creates a test HTTP server that handles all three API endpoints
+// (Artifactory AQL, Xray v1 violations, Xray v2 summary) with realistic responses.
+// Returns one single-platform image (linux/amd64) with one malicious Critical finding
+// (XRAY-MAL-1) and one High+fixable finding (XRAY-CVE-1, JFrog research: Medium).
+func endToEndMockServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.Contains(r.URL.Path, "search/aql"):
+			_, _ = io.WriteString(w, `{"results":[{"repo":"docker-local","path":"myapp/v1","name":"manifest.json","sha256":"abc123def456","properties":[{"key":"docker.os","value":"linux"},{"key":"docker.architecture","value":"amd64"}]}]}`)
+		case strings.Contains(r.URL.Path, "v1/violations"):
+			_, _ = io.WriteString(w, `{"total_violations":1,"violations":[{"violation_id":"V-001","issue_id":"XRAY-MAL-1","severity":"Critical","malicious_package":true}]}`)
+		case strings.Contains(r.URL.Path, "v2/summary/artifact"):
+			_, _ = io.WriteString(w, `{"artifacts":[{"issues":[{"issue_id":"XRAY-MAL-1","severity":"Critical","extended_information":{"jfrog_research_severity":"Critical"},"components":[{"fixed_versions":[]}]},{"issue_id":"XRAY-CVE-1","severity":"High","extended_information":{"jfrog_research_severity":"Medium"},"components":[{"fixed_versions":["2.0.0"]}]}]}]}`)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// endToEndServices creates XrayService and ArtifactoryService pointing at the given test server.
+func endToEndServices(t *testing.T, srv *httptest.Server) (*XrayService, *ArtifactoryService) {
+	t.Helper()
+	client, err := jfroghttpclient.JfrogClientBuilder().Build()
+	require.NoError(t, err)
+	artDetails := artAuth.NewArtifactoryDetails()
+	artDetails.SetUrl(srv.URL + "/")
+	xrayDetails := xrayAuth.NewXrayDetails()
+	xrayDetails.SetUrl(srv.URL + "/")
+	return NewXrayService(client, xrayDetails), NewArtifactoryService(client, artDetails)
+}
+
+func TestRunCheckCommandPipeline_JSONOutput(t *testing.T) {
+	srv := endToEndMockServer(t)
+	xraySvc, artSvc := endToEndServices(t, srv)
+
+	conf := &CheckConfiguration{
+		ImageName:          "docker-local/myapp:v1",
+		Output:             "json",
+		MaliciousWatchName: "test-watch",
+		ProjectKey:         "default",
+		AppName:            "vulnreport",
+		AppVersion:         "vtest",
+	}
+
+	out := captureStdout(t, func() {
+		err := RunCheckCommandFromConf(conf, "docker-local", "myapp", "v1", srv.URL, xraySvc, artSvc)
+		assert.NoError(t, err)
+	})
+
+	var report EnhancedVulnerabilityReport
+	require.NoError(t, json.Unmarshal([]byte(out), &report), "JSON output must parse cleanly")
+
+	assert.Equal(t, "docker-local/myapp:v1", report.ImageName)
+	assert.False(t, report.ImageNotFound)
+	assert.Equal(t, 2, report.Summary.TotalFindings)
+	assert.Equal(t, 1, report.Summary.CriticalCount)
+	assert.Equal(t, 1, report.Summary.HighCount)
+	assert.Equal(t, 1, report.Summary.FixableCount)
+	assert.Equal(t, 1, report.Summary.MaliciousCount)
+	assert.Equal(t, 1, report.Summary.PlatformCount)
+	assert.Equal(t, []string{"XRAY-MAL-1"}, report.MaliciousIssues)
+
+	require.Len(t, report.Platforms, 1)
+	assert.Equal(t, "linux", report.Platforms[0].Platform.OS)
+	assert.Equal(t, "amd64", report.Platforms[0].Platform.Architecture)
+
+	require.Len(t, report.Findings, 2)
+	// Critical sorts first; XRAY-MAL-1 is malicious+critical, not fixable.
+	assert.Equal(t, "XRAY-MAL-1", report.Findings[0].IssueID)
+	assert.Equal(t, "Critical", report.Findings[0].Severity)
+	assert.Equal(t, "Critical", report.Findings[0].JFrogSeverity)
+	assert.True(t, report.Findings[0].Malicious)
+	assert.False(t, report.Findings[0].Fixable)
+	// High+fixable; JFrog research rates it Medium.
+	assert.Equal(t, "XRAY-CVE-1", report.Findings[1].IssueID)
+	assert.Equal(t, "High", report.Findings[1].Severity)
+	assert.Equal(t, "Medium", report.Findings[1].JFrogSeverity)
+	assert.False(t, report.Findings[1].Malicious)
+	assert.True(t, report.Findings[1].Fixable)
+}
+
+func TestRunCheckCommandPipeline_GithubMDOutput(t *testing.T) {
+	srv := endToEndMockServer(t)
+	xraySvc, artSvc := endToEndServices(t, srv)
+
+	conf := &CheckConfiguration{
+		ImageName:          "docker-local/myapp:v1",
+		Output:             "github-md",
+		Silent:             true,
+		MaliciousWatchName: "test-watch",
+		ProjectKey:         "default",
+		AppName:            "vulnreport",
+		AppVersion:         "vtest",
+	}
+
+	out := captureStdout(t, func() {
+		err := RunCheckCommandFromConf(conf, "docker-local", "myapp", "v1", srv.URL, xraySvc, artSvc)
+		assert.NoError(t, err)
+	})
+
+	// Banner: malicious takes highest priority over all other states.
+	assert.Contains(t, out, "badge-malicious.png")
+	assert.Contains(t, out, "[!CAUTION]")
+	assert.Contains(t, out, "MALICIOUS EXPLOIT PRESENT")
+
+	// Security Summary section with all counts populated.
+	assert.Contains(t, out, "## Security Summary")
+	assert.Contains(t, out, "**Total Findings:** 2")
+	assert.Contains(t, out, "**Critical:** 1")
+	assert.Contains(t, out, "**High:** 1")
+	assert.Contains(t, out, "**Malicious:** 1")
+	assert.Contains(t, out, "linux/amd64")
+
+	// Malicious findings table with the XRAY ID from the violations watch.
+	assert.Contains(t, out, "Malicious Findings (1)")
+	assert.Contains(t, out, "XRAY-MAL-1")
+
+	// Security findings table with fixable count and both findings.
+	assert.Contains(t, out, "1 fixable")
+	assert.Contains(t, out, "XRAY-CVE-1")
+
+	// No log-line leakage (github-md sets log level to ERROR).
+	for line := range strings.SplitSeq(out, "\n") {
+		if line == "" {
+			continue
+		}
+		assert.NotRegexp(t, `^\d{2}:\d{2}:\d{2}`, line,
+			"log line leaked into github-md stdout: %q", line)
+	}
+
+	// Footer
+	assert.Contains(t, out, "Generated by vulnreport vtest")
 }
 
 func TestViolationWithMaliciousExtractsFromResponse(t *testing.T) {
@@ -419,7 +592,9 @@ func TestSeverityMeetsMin(t *testing.T) {
 func TestGenerateSecurityBanner_MaliciousViaMap(t *testing.T) {
 	report := &VulnerabilityReport{}
 	lookup := map[string]bool{"XRAY-1": true}
-	out := captureStdout(t, func() { generateSecurityBanner(report, lookup) })
+	var buf bytes.Buffer
+	generateSecurityBanner(&buf, report, lookup)
+	out := buf.String()
 	assert.Contains(t, out, "badge-malicious.png")
 	assert.Contains(t, out, "[!CAUTION]")
 	assert.Contains(t, out, "MALICIOUS EXPLOIT PRESENT")
@@ -427,14 +602,18 @@ func TestGenerateSecurityBanner_MaliciousViaMap(t *testing.T) {
 
 func TestGenerateSecurityBanner_MaliciousViaSlice(t *testing.T) {
 	report := &VulnerabilityReport{MaliciousIssues: []string{"XRAY-1"}}
-	out := captureStdout(t, func() { generateSecurityBanner(report, map[string]bool{}) })
+	var buf bytes.Buffer
+	generateSecurityBanner(&buf, report, map[string]bool{})
+	out := buf.String()
 	assert.Contains(t, out, "badge-malicious.png")
 	assert.Contains(t, out, "[!CAUTION]")
 }
 
 func TestGenerateSecurityBanner_Critical(t *testing.T) {
 	report := &VulnerabilityReport{CriticalCount: 1, TotalIssues: 1}
-	out := captureStdout(t, func() { generateSecurityBanner(report, map[string]bool{}) })
+	var buf bytes.Buffer
+	generateSecurityBanner(&buf, report, map[string]bool{})
+	out := buf.String()
 	assert.Contains(t, out, "badge-critical-cve.png")
 	assert.Contains(t, out, "[!CAUTION]")
 	assert.NotContains(t, out, "MALICIOUS")
@@ -442,7 +621,9 @@ func TestGenerateSecurityBanner_Critical(t *testing.T) {
 
 func TestGenerateSecurityBanner_NonCriticalFindings(t *testing.T) {
 	report := &VulnerabilityReport{HighCount: 2, TotalIssues: 2}
-	out := captureStdout(t, func() { generateSecurityBanner(report, map[string]bool{}) })
+	var buf bytes.Buffer
+	generateSecurityBanner(&buf, report, map[string]bool{})
+	out := buf.String()
 	assert.Contains(t, out, "CVE")
 	assert.Contains(t, out, "[!WARNING]")
 	assert.NotContains(t, out, "MALICIOUS")
@@ -451,7 +632,9 @@ func TestGenerateSecurityBanner_NonCriticalFindings(t *testing.T) {
 
 func TestGenerateSecurityBanner_Clean(t *testing.T) {
 	report := &VulnerabilityReport{}
-	out := captureStdout(t, func() { generateSecurityBanner(report, map[string]bool{}) })
+	var buf bytes.Buffer
+	generateSecurityBanner(&buf, report, map[string]bool{})
+	out := buf.String()
 	assert.Contains(t, out, "badge-no-findings.png")
 	assert.Contains(t, out, "[!NOTE]")
 }
@@ -466,17 +649,29 @@ func TestOutputJSONReport_ImageNotFound(t *testing.T) {
 		GeneratedAt:   "2026-01-01T00:00:00Z",
 		ImageNotFound: true,
 	}
-	out := captureStdout(t, func() {
-		err := outputJSONReport(report, map[string]bool{})
-		assert.NoError(t, err)
-	})
+	var buf bytes.Buffer
+	require.NoError(t, outputJSONReport(&buf, report, map[string]bool{}, "vulnreport", "vtest"))
 
 	var enhanced EnhancedVulnerabilityReport
-	require.NoError(t, json.Unmarshal([]byte(out), &enhanced))
+	require.NoError(t, json.Unmarshal(buf.Bytes(), &enhanced))
 	assert.True(t, enhanced.ImageNotFound)
 	assert.Equal(t, 0, enhanced.Summary.TotalFindings)
 	assert.Equal(t, 0, enhanced.Summary.MaliciousCount)
 	assert.Empty(t, enhanced.Platforms)
+}
+
+func TestOutputJSONReport_AppNameVersionPresent(t *testing.T) {
+	report := &VulnerabilityReport{
+		ImageName:   "docker-local/app:v1",
+		GeneratedAt: "2026-01-01T00:00:00Z",
+	}
+	var buf bytes.Buffer
+	require.NoError(t, outputJSONReport(&buf, report, map[string]bool{}, "vulnreport", "v0.1.9"))
+
+	var enhanced EnhancedVulnerabilityReport
+	require.NoError(t, json.Unmarshal(buf.Bytes(), &enhanced))
+	assert.Equal(t, "vulnreport", enhanced.PluginName)
+	assert.Equal(t, "v0.1.9", enhanced.PluginVersion)
 }
 
 func TestOutputJSONReport_WithCounts(t *testing.T) {
@@ -489,38 +684,82 @@ func TestOutputJSONReport_WithCounts(t *testing.T) {
 		Platforms: []PlatformVulnerabilityInfo{
 			{Platform: Platform{OS: "linux", Architecture: "amd64"}},
 		},
+		SummaryIssues: []SummaryIssue{
+			{IssueID: "XRAY-10", Severity: "Critical", Fixable: true, Platforms: []string{"linux/amd64"}},
+			{IssueID: "XRAY-20", Severity: "High", Fixable: false, Platforms: []string{"linux/amd64"}},
+		},
 	}
 	lookup := map[string]bool{"XRAY-1": true}
-	out := captureStdout(t, func() {
-		err := outputJSONReport(report, lookup)
-		assert.NoError(t, err)
-	})
+	var buf bytes.Buffer
+	require.NoError(t, outputJSONReport(&buf, report, lookup, "vulnreport", "vtest"))
 
 	var enhanced EnhancedVulnerabilityReport
-	require.NoError(t, json.Unmarshal([]byte(out), &enhanced))
+	require.NoError(t, json.Unmarshal(buf.Bytes(), &enhanced))
 	assert.Equal(t, 7, enhanced.Summary.TotalFindings)
 	assert.Equal(t, 2, enhanced.Summary.CriticalCount)
 	assert.Equal(t, 5, enhanced.Summary.HighCount)
+	assert.Equal(t, 1, enhanced.Summary.FixableCount)
 	assert.Equal(t, 1, enhanced.Summary.MaliciousCount) // from map size
 	assert.Equal(t, 1, enhanced.Summary.PlatformCount)
+	require.Len(t, enhanced.Findings, 2)
+	assert.Equal(t, "XRAY-10", enhanced.Findings[0].IssueID) // Critical sorts first
+	assert.True(t, enhanced.Findings[0].Fixable)
 }
 
 func TestOutputJSONReport_MaliciousCountFromMap(t *testing.T) {
-	// maliciousCount in JSON comes from len(maliciousLookup), NOT len(MaliciousIssues).
+	// MaliciousCount in summary comes from len(maliciousLookup); MaliciousIssues from report.MaliciousIssues.
 	report := &VulnerabilityReport{
 		ImageName:       "docker-local/app:v1",
 		GeneratedAt:     "2026-01-01T00:00:00Z",
 		MaliciousIssues: []string{"A", "B"},
 	}
 	lookup := map[string]bool{"A": true, "B": true, "C": true}
-	out := captureStdout(t, func() {
-		err := outputJSONReport(report, lookup)
-		assert.NoError(t, err)
-	})
+	var buf bytes.Buffer
+	require.NoError(t, outputJSONReport(&buf, report, lookup, "vulnreport", "vtest"))
 
 	var enhanced EnhancedVulnerabilityReport
-	require.NoError(t, json.Unmarshal([]byte(out), &enhanced))
-	assert.Equal(t, 3, enhanced.Summary.MaliciousCount) // map has 3 keys
+	require.NoError(t, json.Unmarshal(buf.Bytes(), &enhanced))
+	assert.Equal(t, 3, enhanced.Summary.MaliciousCount)           // map has 3 keys
+	assert.Equal(t, []string{"A", "B"}, enhanced.MaliciousIssues) // from report.MaliciousIssues
+}
+
+func TestOutputJSONReport_FindingsFromSummaryIssues(t *testing.T) {
+	report := &VulnerabilityReport{
+		ImageName:   "docker-local/app:v1",
+		GeneratedAt: "2026-01-01T00:00:00Z",
+		SummaryIssues: []SummaryIssue{
+			// High severity listed first — should sort second after Critical
+			{IssueID: "XRAY-99", Severity: "High", JFrogSeverity: "Critical", Fixable: false, Platforms: []string{"linux/amd64"}},
+			// Critical — should sort first
+			{IssueID: "XRAY-01", Severity: "Critical", JFrogSeverity: "Critical", Fixable: true, Platforms: []string{"linux/amd64", "linux/arm64"}},
+		},
+		MaliciousIssues: []string{"XRAY-99"},
+	}
+	lookup := map[string]bool{"XRAY-99": true}
+	var buf bytes.Buffer
+	require.NoError(t, outputJSONReport(&buf, report, lookup, "vulnreport", "vtest"))
+
+	var enhanced EnhancedVulnerabilityReport
+	require.NoError(t, json.Unmarshal(buf.Bytes(), &enhanced))
+
+	assert.Equal(t, []string{"XRAY-99"}, enhanced.MaliciousIssues)
+	assert.Equal(t, 1, enhanced.Summary.FixableCount)
+	assert.Equal(t, 1, enhanced.Summary.MaliciousCount)
+	require.Len(t, enhanced.Findings, 2)
+
+	critical := enhanced.Findings[0]
+	assert.Equal(t, "XRAY-01", critical.IssueID)
+	assert.Equal(t, "Critical", critical.Severity)
+	assert.Equal(t, "Critical", critical.JFrogSeverity)
+	assert.True(t, critical.Fixable)
+	assert.False(t, critical.Malicious)
+	assert.Equal(t, []string{"linux/amd64", "linux/arm64"}, critical.Platforms)
+
+	high := enhanced.Findings[1]
+	assert.Equal(t, "XRAY-99", high.IssueID)
+	assert.Equal(t, "High", high.Severity)
+	assert.True(t, high.Malicious)
+	assert.False(t, high.Fixable)
 }
 
 // ---------------------------------------------------------------------------
@@ -533,10 +772,9 @@ func TestOutputMarkdownReport_ImageNotFound(t *testing.T) {
 		GeneratedAt:   "2026-01-01T00:00:00Z",
 		ImageNotFound: true,
 	}
-	out := captureStdout(t, func() {
-		err := outputMarkdownReport(report, map[string]bool{}, "", "", false, "vulnreport", "vtest")
-		assert.NoError(t, err)
-	})
+	var buf bytes.Buffer
+	require.NoError(t, outputMarkdownReport(&buf, report, map[string]bool{}, "", "", false, "vulnreport", "vtest"))
+	out := buf.String()
 	assert.Contains(t, out, "badge-no-image-found.png")
 	assert.Contains(t, out, "# Xray Security Report")
 	assert.Contains(t, out, "No Image Found")
@@ -549,10 +787,9 @@ func TestOutputMarkdownReport_ManifestURLPresent(t *testing.T) {
 		ImageName:   "docker-local/app:v1",
 		GeneratedAt: "2026-01-01T00:00:00Z",
 	}
-	out := captureStdout(t, func() {
-		err := outputMarkdownReport(report, map[string]bool{}, "https://example.jfrog.io/ui/repos/tree/Xray/docker-local/app/v1/manifest.json", "", false, "vulnreport", "vtest")
-		assert.NoError(t, err)
-	})
+	var buf bytes.Buffer
+	require.NoError(t, outputMarkdownReport(&buf, report, map[string]bool{}, "https://example.jfrog.io/ui/repos/tree/Xray/docker-local/app/v1/manifest.json", "", false, "vulnreport", "vtest"))
+	out := buf.String()
 	assert.Contains(t, out, "> **View manifest:**")
 	assert.Contains(t, out, "https://example.jfrog.io/ui/repos/tree/Xray/docker-local/app/v1/manifest.json")
 }
@@ -562,10 +799,9 @@ func TestOutputMarkdownReport_ManifestURLAbsent(t *testing.T) {
 		ImageName:   "docker-local/app:v1",
 		GeneratedAt: "2026-01-01T00:00:00Z",
 	}
-	out := captureStdout(t, func() {
-		err := outputMarkdownReport(report, map[string]bool{}, "", "", false, "vulnreport", "vtest")
-		assert.NoError(t, err)
-	})
+	var buf bytes.Buffer
+	require.NoError(t, outputMarkdownReport(&buf, report, map[string]bool{}, "", "", false, "vulnreport", "vtest"))
+	out := buf.String()
 	assert.NotContains(t, out, "View manifest")
 }
 
@@ -581,10 +817,9 @@ func TestOutputMarkdownReport_NoFindingsFlag(t *testing.T) {
 			{IssueID: "XRAY-102", Severity: "High"},
 		},
 	}
-	out := captureStdout(t, func() {
-		err := outputMarkdownReport(report, map[string]bool{}, "", "", true, "vulnreport", "vtest")
-		assert.NoError(t, err)
-	})
+	var buf bytes.Buffer
+	require.NoError(t, outputMarkdownReport(&buf, report, map[string]bool{}, "", "", true, "vulnreport", "vtest"))
+	out := buf.String()
 	assert.NotContains(t, out, "<details>")
 	assert.NotContains(t, out, "Security Findings")
 }
@@ -600,10 +835,9 @@ func TestOutputMarkdownReport_MinSeverityFiltering(t *testing.T) {
 			{IssueID: "XRAY-LOW", Severity: "Low"},
 		},
 	}
-	out := captureStdout(t, func() {
-		err := outputMarkdownReport(report, map[string]bool{}, "", "High", false, "vulnreport", "vtest")
-		assert.NoError(t, err)
-	})
+	var buf bytes.Buffer
+	require.NoError(t, outputMarkdownReport(&buf, report, map[string]bool{}, "", "High", false, "vulnreport", "vtest"))
+	out := buf.String()
 	assert.Contains(t, out, "XRAY-CRIT")
 	assert.Contains(t, out, "XRAY-HIGH")
 	assert.NotContains(t, out, "XRAY-LOW")
@@ -615,10 +849,9 @@ func TestOutputMarkdownReport_MaliciousFindingsTable(t *testing.T) {
 		GeneratedAt:     "2026-01-01T00:00:00Z",
 		MaliciousIssues: []string{"XRAY-A", "XRAY-B"},
 	}
-	out := captureStdout(t, func() {
-		err := outputMarkdownReport(report, map[string]bool{"XRAY-A": true, "XRAY-B": true}, "", "", false, "vulnreport", "vtest")
-		assert.NoError(t, err)
-	})
+	var buf bytes.Buffer
+	require.NoError(t, outputMarkdownReport(&buf, report, map[string]bool{"XRAY-A": true, "XRAY-B": true}, "", "", false, "vulnreport", "vtest"))
+	out := buf.String()
 	assert.Contains(t, out, "Malicious Findings (2)")
 	assert.Contains(t, out, "XRAY-A")
 	assert.Contains(t, out, "XRAY-B")
@@ -630,15 +863,14 @@ func TestOutputMarkdownReport_FindingsTableSorting(t *testing.T) {
 		GeneratedAt: "2026-01-01T00:00:00Z",
 		TotalIssues: 3,
 		SummaryIssues: []SummaryIssue{
-			{IssueID: "XRAY-200", Severity: "High"},    // added out of severity order
+			{IssueID: "XRAY-200", Severity: "High"},     // added out of severity order
 			{IssueID: "XRAY-100", Severity: "Critical"},
 			{IssueID: "XRAY-101", Severity: "Critical"}, // same severity — sort by ID
 		},
 	}
-	out := captureStdout(t, func() {
-		err := outputMarkdownReport(report, map[string]bool{}, "", "", false, "vulnreport", "vtest")
-		assert.NoError(t, err)
-	})
+	var buf bytes.Buffer
+	require.NoError(t, outputMarkdownReport(&buf, report, map[string]bool{}, "", "", false, "vulnreport", "vtest"))
+	out := buf.String()
 	// Critical rows must appear before the High row.
 	critPos := strings.Index(out, "XRAY-100")
 	highPos := strings.Index(out, "XRAY-200")
@@ -655,10 +887,9 @@ func TestOutputMarkdownReport_Footer(t *testing.T) {
 		ImageName:   "docker-local/app:v1",
 		GeneratedAt: "2026-07-23T10:00:00Z",
 	}
-	out := captureStdout(t, func() {
-		err := outputMarkdownReport(report, map[string]bool{}, "", "", false, "vulnreport", "vtest")
-		assert.NoError(t, err)
-	})
+	var buf bytes.Buffer
+	require.NoError(t, outputMarkdownReport(&buf, report, map[string]bool{}, "", "", false, "vulnreport", "vtest"))
+	out := buf.String()
 	assert.Contains(t, out, "Generated by vulnreport vtest")
 	assert.Contains(t, out, "2026-07-23T10:00:00Z")
 }
@@ -669,7 +900,369 @@ func TestOutputMarkdownReport_Footer(t *testing.T) {
 
 func TestOutputReport_UnsupportedFormat(t *testing.T) {
 	report := &VulnerabilityReport{ImageName: "docker-local/app:v1", GeneratedAt: "2026-01-01T00:00:00Z"}
-	err := outputReport(report, map[string]bool{}, "xml", "", "", false, "vulnreport", "vtest")
+	err := outputReport(&bytes.Buffer{}, report, map[string]bool{}, "xml", "", "", false, "vulnreport", "vtest")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unsupported output format")
+}
+
+func TestOutputTableReport_ImageNotFound(t *testing.T) {
+	report := &VulnerabilityReport{
+		ImageName:     "docker-local/missing:v1",
+		GeneratedAt:   "2026-01-01T00:00:00Z",
+		ImageNotFound: true,
+	}
+	var buf bytes.Buffer
+	require.NoError(t, outputTableReport(&buf, report, map[string]bool{}, "", "", false, "vulnreport", "vtest"))
+	out := buf.String()
+	assert.Contains(t, out, "docker-local/missing:v1")
+	assert.Contains(t, out, "No Image Found")
+	assert.Contains(t, out, "vulnreport vtest")
+}
+
+func TestOutputTableReport_Clean(t *testing.T) {
+	report := &VulnerabilityReport{
+		ImageName:   "docker-local/clean:v1",
+		GeneratedAt: "2026-01-01T00:00:00Z",
+		Platforms:   []PlatformVulnerabilityInfo{{Platform: Platform{OS: "linux", Architecture: "amd64"}}},
+	}
+	var buf bytes.Buffer
+	require.NoError(t, outputTableReport(&buf, report, map[string]bool{}, "https://example.com/manifest", "", false, "vulnreport", "vtest"))
+	out := buf.String()
+	assert.Contains(t, out, "docker-local/clean:v1")
+	assert.Contains(t, out, "https://example.com/manifest")
+	assert.Contains(t, out, "NO FINDINGS")
+	assert.Contains(t, out, "Total Findings")
+	assert.Contains(t, out, "vulnreport vtest")
+}
+
+func TestOutputTableReport_WithFindings(t *testing.T) {
+	report := &VulnerabilityReport{
+		ImageName:     "docker-local/app:v1",
+		GeneratedAt:   "2026-01-01T00:00:00Z",
+		TotalIssues:   2,
+		CriticalCount: 1,
+		HighCount:     1,
+		Platforms:     []PlatformVulnerabilityInfo{{Platform: Platform{OS: "linux", Architecture: "amd64"}}},
+		SummaryIssues: []SummaryIssue{
+			{IssueID: "XRAY-999", Severity: "Critical", Fixable: true, Platforms: []string{"linux/amd64"}},
+			{IssueID: "XRAY-888", Severity: "High", Fixable: false, Platforms: []string{"linux/amd64"}},
+		},
+	}
+	var buf bytes.Buffer
+	require.NoError(t, outputTableReport(&buf, report, map[string]bool{}, "", "", false, "vulnreport", "vtest"))
+	out := buf.String()
+	assert.Contains(t, out, "CRITICAL CVEs PRESENT")
+	assert.Contains(t, out, "Security Findings (2 | 1 fixable)")
+	assert.Contains(t, out, "XRAY-999")
+	assert.Contains(t, out, "XRAY-888")
+	assert.Contains(t, out, "Critical")
+	assert.Contains(t, out, "High")
+}
+
+func TestOutputTableReport_Malicious(t *testing.T) {
+	report := &VulnerabilityReport{
+		ImageName:       "docker-local/bad:v1",
+		GeneratedAt:     "2026-01-01T00:00:00Z",
+		TotalIssues:     1,
+		CriticalCount:   1,
+		MaliciousIssues: []string{"XRAY-666"},
+		Platforms:       []PlatformVulnerabilityInfo{{Platform: Platform{OS: "linux", Architecture: "amd64"}}},
+		SummaryIssues: []SummaryIssue{
+			{IssueID: "XRAY-666", Severity: "Critical", Fixable: false, Platforms: []string{"linux/amd64"}},
+		},
+	}
+	lookup := map[string]bool{"XRAY-666": true}
+	var buf bytes.Buffer
+	require.NoError(t, outputTableReport(&buf, report, lookup, "", "", false, "vulnreport", "vtest"))
+	out := buf.String()
+	assert.Contains(t, out, "MALICIOUS EXPLOIT PRESENT")
+	assert.Contains(t, out, "Malicious Findings (1)")
+	assert.Contains(t, out, "XRAY-666")
+	assert.Contains(t, out, "Security Findings")
+}
+
+// ---------------------------------------------------------------------------
+// --save-output: file writing and console confirmation
+// ---------------------------------------------------------------------------
+
+// chdirTemp changes the working directory to a temp dir for the duration of the test.
+func chdirTemp(t *testing.T) string {
+	t.Helper()
+	tmp := t.TempDir()
+	orig, err := os.Getwd()
+	require.NoError(t, err)
+	require.NoError(t, os.Chdir(tmp))
+	t.Cleanup(func() { _ = os.Chdir(orig) })
+	return tmp
+}
+
+func TestSaveOutput_JSON(t *testing.T) {
+	tmp := chdirTemp(t)
+	srv := endToEndMockServer(t)
+	xraySvc, artSvc := endToEndServices(t, srv)
+
+	conf := &CheckConfiguration{
+		ImageName:          "docker-local/myapp:v1",
+		Output:             "table",
+		MaliciousWatchName: "test-watch",
+		ProjectKey:         "default",
+		AppName:            "vulnreport",
+		AppVersion:         "vtest",
+		SaveOutput:         "json",
+	}
+
+	out := captureStdout(t, func() {
+		require.NoError(t, RunCheckCommandFromConf(conf, "docker-local", "myapp", "v1", srv.URL, xraySvc, artSvc))
+	})
+
+	// Console only shows the saved confirmation — no report body.
+	assert.Contains(t, out, "vulnreport.json")
+	assert.NotContains(t, out, "Security Summary")
+
+	// File exists and contains valid JSON with expected content.
+	data, err := os.ReadFile(filepath.Join(tmp, "vulnreport.json")) //nolint:gosec // G304: path is test-controlled temp dir
+	require.NoError(t, err)
+	var report EnhancedVulnerabilityReport
+	require.NoError(t, json.Unmarshal(data, &report), "vulnreport.json must be valid JSON")
+	assert.Equal(t, "docker-local/myapp:v1", report.ImageName)
+	assert.Equal(t, 2, report.Summary.TotalFindings)
+	assert.Equal(t, []string{"XRAY-MAL-1"}, report.MaliciousIssues)
+}
+
+func TestSaveOutput_GithubMD(t *testing.T) {
+	tmp := chdirTemp(t)
+	srv := endToEndMockServer(t)
+	xraySvc, artSvc := endToEndServices(t, srv)
+
+	conf := &CheckConfiguration{
+		ImageName:          "docker-local/myapp:v1",
+		Output:             "table",
+		MaliciousWatchName: "test-watch",
+		ProjectKey:         "default",
+		AppName:            "vulnreport",
+		AppVersion:         "vtest",
+		SaveOutput:         "github-md",
+	}
+
+	out := captureStdout(t, func() {
+		require.NoError(t, RunCheckCommandFromConf(conf, "docker-local", "myapp", "v1", srv.URL, xraySvc, artSvc))
+	})
+
+	assert.Contains(t, out, "vulnreport.md")
+	assert.NotContains(t, out, "Security Summary")
+
+	data, err := os.ReadFile(filepath.Join(tmp, "vulnreport.md")) //nolint:gosec // G304: path is test-controlled temp dir
+	require.NoError(t, err)
+	md := string(data)
+	assert.Contains(t, md, "badge-malicious.png")
+	assert.Contains(t, md, "MALICIOUS EXPLOIT PRESENT")
+	assert.Contains(t, md, "## Security Summary")
+	assert.Contains(t, md, "Generated by vulnreport vtest")
+}
+
+func TestSaveOutput_BothFormats(t *testing.T) {
+	tmp := chdirTemp(t)
+	srv := endToEndMockServer(t)
+	xraySvc, artSvc := endToEndServices(t, srv)
+
+	conf := &CheckConfiguration{
+		ImageName:          "docker-local/myapp:v1",
+		Output:             "table",
+		MaliciousWatchName: "test-watch",
+		ProjectKey:         "default",
+		AppName:            "vulnreport",
+		AppVersion:         "vtest",
+		SaveOutput:         "json,github-md",
+	}
+
+	out := captureStdout(t, func() {
+		require.NoError(t, RunCheckCommandFromConf(conf, "docker-local", "myapp", "v1", srv.URL, xraySvc, artSvc))
+	})
+
+	// Both file names appear in the saved confirmation line.
+	assert.Contains(t, out, "vulnreport.json")
+	assert.Contains(t, out, "vulnreport.md")
+
+	// Both files exist.
+	_, err := os.Stat(filepath.Join(tmp, "vulnreport.json"))
+	require.NoError(t, err, "vulnreport.json must exist")
+	_, err = os.Stat(filepath.Join(tmp, "vulnreport.md"))
+	require.NoError(t, err, "vulnreport.md must exist")
+}
+
+func TestSaveOutput_InvalidFormat(t *testing.T) {
+	srv := endToEndMockServer(t)
+	xraySvc, artSvc := endToEndServices(t, srv)
+
+	conf := &CheckConfiguration{
+		ImageName:          "docker-local/myapp:v1",
+		Output:             "table",
+		MaliciousWatchName: "test-watch",
+		ProjectKey:         "default",
+		AppName:            "vulnreport",
+		AppVersion:         "vtest",
+		SaveOutput:         "xml",
+	}
+
+	err := RunCheckCommandFromConf(conf, "docker-local", "myapp", "v1", srv.URL, xraySvc, artSvc)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unsupported --save-output format")
+	assert.Contains(t, err.Error(), "xml")
+}
+
+func TestSaveOutput_WhitespaceTrimming(t *testing.T) {
+	// "json, github-md" (space after comma) must be treated the same as "json,github-md".
+	tmp := chdirTemp(t)
+	report := &VulnerabilityReport{
+		ImageName:   "docker-local/app:v1",
+		GeneratedAt: "2026-01-01T00:00:00Z",
+	}
+	conf := &CheckConfiguration{
+		SaveOutput: "json, github-md",
+		AppName:    "vulnreport",
+		AppVersion: "vtest",
+	}
+
+	out := captureStdout(t, func() {
+		require.NoError(t, saveOutputToFiles(conf, report, map[string]bool{}, ""))
+	})
+
+	assert.Contains(t, out, "vulnreport.json")
+	assert.Contains(t, out, "vulnreport.md")
+	_, err := os.Stat(filepath.Join(tmp, "vulnreport.json"))
+	require.NoError(t, err, "vulnreport.json must be created when format has surrounding whitespace")
+	_, err = os.Stat(filepath.Join(tmp, "vulnreport.md"))
+	require.NoError(t, err, "vulnreport.md must be created when format has surrounding whitespace")
+}
+
+func TestSaveOutput_FailOnVulnStillFires(t *testing.T) {
+	// When --save-output and --fail-on-vuln are both set, the file must be written
+	// AND the error must still be returned. saveOutputToFiles runs before the vuln check.
+	tmp := chdirTemp(t)
+	srv := endToEndMockServer(t) // returns 2 findings including 1 malicious
+	xraySvc, artSvc := endToEndServices(t, srv)
+
+	conf := &CheckConfiguration{
+		ImageName:          "docker-local/myapp:v1",
+		Output:             "table",
+		MaliciousWatchName: "test-watch",
+		ProjectKey:         "default",
+		AppName:            "vulnreport",
+		AppVersion:         "vtest",
+		SaveOutput:         "json",
+		FailOnVuln:         true,
+	}
+
+	var vulnErr error
+	captureStdout(t, func() {
+		vulnErr = RunCheckCommandFromConf(conf, "docker-local", "myapp", "v1", srv.URL, xraySvc, artSvc)
+	})
+
+	// fail-on-vuln must fire.
+	require.Error(t, vulnErr)
+	assert.Contains(t, vulnErr.Error(), "vulnerability")
+
+	// File must have been written before the error was returned.
+	data, err := os.ReadFile(filepath.Join(tmp, "vulnreport.json")) //nolint:gosec // G304: path is test-controlled temp dir
+	require.NoError(t, err, "vulnreport.json must be written even when fail-on-vuln fires")
+	var report EnhancedVulnerabilityReport
+	require.NoError(t, json.Unmarshal(data, &report))
+	assert.Equal(t, 2, report.Summary.TotalFindings)
+}
+
+func TestSaveOutput_ImageNotFound(t *testing.T) {
+	// When AQL returns no results the saved JSON must have imageNotFound: true
+	// and zero counts rather than an error.
+	tmp := chdirTemp(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(r.URL.Path, "search/aql") {
+			_, _ = io.WriteString(w, `{"results":[]}`)
+		} else {
+			_, _ = io.WriteString(w, `{}`)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	xraySvc, artSvc := endToEndServices(t, srv)
+
+	conf := &CheckConfiguration{
+		ImageName:          "docker-local/noexist:notag",
+		MaliciousWatchName: "test-watch",
+		ProjectKey:         "default",
+		AppName:            "vulnreport",
+		AppVersion:         "vtest",
+		SaveOutput:         "json",
+	}
+
+	captureStdout(t, func() {
+		require.NoError(t, RunCheckCommandFromConf(conf, "docker-local", "noexist", "notag", srv.URL, xraySvc, artSvc))
+	})
+
+	data, err := os.ReadFile(filepath.Join(tmp, "vulnreport.json")) //nolint:gosec // G304: path is test-controlled temp dir
+	require.NoError(t, err)
+	var report EnhancedVulnerabilityReport
+	require.NoError(t, json.Unmarshal(data, &report))
+	assert.True(t, report.ImageNotFound, "saved JSON must report imageNotFound when AQL returns no results")
+	assert.Equal(t, 0, report.Summary.TotalFindings)
+	assert.Equal(t, 0, report.Summary.MaliciousCount)
+}
+
+func TestSaveOutput_MinSeverityRespectedInFile(t *testing.T) {
+	// --min-severity must filter the Security Findings table inside the saved markdown file.
+	tmp := chdirTemp(t)
+	report := &VulnerabilityReport{
+		ImageName:   "docker-local/app:v1",
+		GeneratedAt: "2026-01-01T00:00:00Z",
+		TotalIssues: 3,
+		SummaryIssues: []SummaryIssue{
+			{IssueID: "XRAY-CRIT", Severity: "Critical"},
+			{IssueID: "XRAY-HIGH", Severity: "High"},
+			{IssueID: "XRAY-LOW", Severity: "Low"},
+		},
+	}
+	conf := &CheckConfiguration{
+		SaveOutput:  "github-md",
+		MinSeverity: "High",
+		AppName:     "vulnreport",
+		AppVersion:  "vtest",
+	}
+
+	require.NoError(t, saveOutputToFiles(conf, report, map[string]bool{}, ""))
+
+	data, err := os.ReadFile(filepath.Join(tmp, "vulnreport.md")) //nolint:gosec // G304: path is test-controlled temp dir
+	require.NoError(t, err)
+	md := string(data)
+	assert.Contains(t, md, "XRAY-CRIT", "Critical must appear: meets --min-severity High")
+	assert.Contains(t, md, "XRAY-HIGH", "High must appear: equals --min-severity High")
+	assert.NotContains(t, md, "XRAY-LOW", "Low must be filtered out by --min-severity High")
+}
+
+func TestSaveOutput_NoFindingsRespectedInFile(t *testing.T) {
+	// --no-findings must suppress the collapsible findings table inside the saved markdown file.
+	tmp := chdirTemp(t)
+	report := &VulnerabilityReport{
+		ImageName:   "docker-local/app:v1",
+		GeneratedAt: "2026-01-01T00:00:00Z",
+		TotalIssues: 2,
+		HighCount:   2,
+		SummaryIssues: []SummaryIssue{
+			{IssueID: "XRAY-100", Severity: "High"},
+			{IssueID: "XRAY-101", Severity: "High"},
+		},
+	}
+	conf := &CheckConfiguration{
+		SaveOutput: "github-md",
+		NoFindings: true,
+		AppName:    "vulnreport",
+		AppVersion: "vtest",
+	}
+
+	require.NoError(t, saveOutputToFiles(conf, report, map[string]bool{}, ""))
+
+	data, err := os.ReadFile(filepath.Join(tmp, "vulnreport.md")) //nolint:gosec // G304: path is test-controlled temp dir
+	require.NoError(t, err)
+	md := string(data)
+	assert.NotContains(t, md, "<details>", "--no-findings must suppress the collapsible table")
+	assert.NotContains(t, md, "XRAY-100", "--no-findings must suppress individual finding rows")
+	assert.Contains(t, md, "## Security Summary", "Security Summary must still appear with --no-findings")
 }

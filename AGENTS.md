@@ -41,8 +41,10 @@ go build -o vulnreport . && jf plugin install vulnreport  # Install as JFrog CLI
 
 ## Architecture Notes
 
-- **Single command**: `check` — no subcommands planned
-- **Output formats**: `json` (default, enhanced report with image metadata/counts), `github-md` (GitHub-flavored markdown with alert banners for CI pipelines)
+- **Single command**: `check` (alias: `ck`) — no subcommands planned
+- **Output formats**: `table` (default, CLI-friendly Unicode box tables), `json` (structured JSON report), `github-md` (GitHub-flavored markdown with alert banners for CI pipelines)
+- **Save-to-file**: `--save-output json,github-md` writes any combination of formats to files in the current working directory instead of stdout; console prints only "Saved: …"
+- **Log levels**: DEBUG when `--debug` is set, WARN by default (table/json), ERROR for `github-md` (suppresses all non-error output so only markdown reaches stdout)
 - Image tag input → AQL search → manifest discovery → Violations API (malicious watch) → v2 summary API (counts + fixable) → formatted report
 
 ### Code Organization & File Responsibilities
@@ -52,8 +54,8 @@ go build -o vulnreport . && jf plugin install vulnreport  # Install as JFrog CLI
 **CLI command**: `commands/check.go` — `CheckCommand` struct with fluent setters for all flags. `GetCheckCommand()` registers the CLI command; `checkCmd()` reads framework flags into `CheckCommand` fields and calls `Exec()`. Any new flag must be registered in both `getCheckFlags()` and `Exec()`.
 
 **Internal logic**: `/internal/` package contains business logic split across five files:
-- `check_runner.go` — main command implementation; `RunCheckCommand` orchestrates auth, service creation, and report generation. `generateVulnerabilityReport` handles dual-path discovery, Violations API queries for all platforms (no early break), malicious lookup map construction, and severity aggregation. Output formatters: `outputJSONReport`, `outputMarkdownReport` (emits GitHub alert banners via `generateSecurityBanner`).
-- `models.go` — Go types matching Xray/Artifactory JSON payloads (`DockerManifest`, `ManifestList`, `VulnerabilityReport`, `EnhancedVulnerabilityReport`, `CompactFinding`).
+- `check_runner.go` — main command implementation; `RunCheckCommand` orchestrates auth, service creation, and report generation; `RunCheckCommandFromConf` is the exported DI-injectable entry point used by tests (skips credential lookup when services are pre-injected). `generateVulnerabilityReport` handles dual-path discovery, Violations API queries for all platforms (no early break), malicious lookup map construction, and severity aggregation. Output formatters: `outputTableReport` (Unicode box tables, default), `outputJSONReport`, `outputMarkdownReport` (emits GitHub alert banners via `generateSecurityBanner`). `saveOutputToFiles` writes json/github-md to CWD files and prints confirmation — called instead of `outputReport` when `--save-output` is set; runs before the `--fail-on-vuln` check. `setLogLevel()` sets the JFrog SDK logger: DEBUG (`--debug`), WARN (default for table/json), ERROR (`github-md`).
+- `models.go` — Go types matching Xray/Artifactory JSON payloads (`DockerManifest`, `ManifestList`, `VulnerabilityReport`, `EnhancedVulnerabilityReport`, `CheckConfiguration`).
 - `helpers.go` — pure utilities: `GetDigestPaths`, `extractRepoFromPath`, `IsValidManifestContent`.
 - `docker_paths.go` — Docker image path discovery. `discoverImageArtifacts` uses AQL search via `ArtifactoryService`; `expandListManifest` builds per-platform paths as `<repo>/<image>/<tag>/sha256__<digest>/manifest.json`; `FilterManifestsByPlatform` filters by os/arch.
 - `xray_sdk.go` — SDK service wrappers. `XrayService` wraps `*jfroghttpclient.JfrogHttpClient` for Xray API calls: `GetViolations` (paginated `POST /api/v1/violations` for malicious lookup) and `GetSummaryV2` (`POST /api/v2/summary/artifact` for severity counts and per-issue detail). `ArtifactoryService` wraps the same client type for Artifactory AQL search (`SearchArtifacts`) and raw artifact fetch (`FetchArtifactBody`). Both mirror the `XscInnerService` pattern from `jfrog-client-go`. Also defines `xrayViolation`, `xrayViolationInfo`, `violationWithMalicious`, `extractCwesFromProperties`, `SeverityCounts`, and `SummaryIssue` (IssueID, Severity, JFrogSeverity, Fixable, Platforms).
@@ -63,7 +65,7 @@ go build -o vulnreport . && jf plugin install vulnreport  # Install as JFrog CLI
 ## Testing & Publishing
 
 - Add tests before publishing — GitHub Actions runs `go vet ./... && go test ./...` and checks for test coverage
-- Tests live in the same `_test.go` files alongside their source packages (`internal/check_test.go`, `internal/xray_sdk_test.go`)
+- Tests live in `_test.go` files alongside their source packages: `internal/check_test.go`, `internal/xray_sdk_test.go`, `commands/check_test.go`, `main_test.go`
 
 ### Publishing to Registry
 
@@ -74,7 +76,7 @@ go build -o vulnreport . && jf plugin install vulnreport  # Install as JFrog CLI
 **Descriptor format** (submit to jfrog-cli-plugins-reg, not stored here):
 ```yaml
 pluginName: vulnreport
-version: v0.1.7
+version: v0.1.10
 repository: https://github.com/jmhardison/jfrog-vulnreport
 maintainers:
   - jmhardison
@@ -185,14 +187,14 @@ The `--project-key` flag is passed in the Violations API query URL (`?projectKey
 ```
 .
 ├── /commands/
-│   └── check.go         -> CheckCommand struct + fluent setters + Exec() bridge; GetCheckCommand() registers CLI
+│   └── check.go         -> CheckCommand struct + fluent setters + Exec() bridge; GetCheckCommand() registers CLI (alias: ck)
 ├── /internal/
-│   ├── check_runner.go  -> RunCheckCommand, generateVulnerabilityReport, output formatters, severity filtering
-│   ├── models.go        -> Types: DockerManifest, ManifestList, VulnerabilityReport, EnhancedVulnerabilityReport, CompactFinding
+│   ├── check_runner.go  -> RunCheckCommand, generateVulnerabilityReport, output formatters, saveOutputToFiles, severity filtering
+│   ├── models.go        -> Types: DockerManifest, ManifestList, VulnerabilityReport, EnhancedVulnerabilityReport, CheckConfiguration
 │   ├── helpers.go       -> GetDigestPaths, extractRepoFromPath, IsValidManifestContent
 │   ├── docker_paths.go  -> discoverImageArtifacts, expandListManifest, FilterManifestsByPlatform, rtArtifact
-│   └── xray_sdk.go      -> XrayService (GetViolations), ArtifactoryService (SearchArtifacts, FetchArtifactBody),
-│                           xrayViolation, violationWithMalicious, extractCwesFromProperties, AQL types
+│   └── xray_sdk.go      -> XrayService (GetViolations, GetSummaryV2), ArtifactoryService (SearchArtifacts, FetchArtifactBody),
+│                           xrayViolation, violationWithMalicious, extractCwesFromProperties, SeverityCounts, SummaryIssue, AQL types
 └── main.go              -> Entry point: plugin registration, BuildTime, Version
 ```
 
@@ -206,11 +208,14 @@ The `--project-key` flag is passed in the Violations API query URL (`?projectKey
 6. **AQL requires `text/plain` content type** — the Artifactory AQL endpoint (`POST /api/search/aql`) requires `Content-Type: text/plain`, not `application/json`.
 7. **AQL path reconstruction** — AQL returns `{repo, path, name}` separately. Full artifact path is `repo + "/" + path + "/" + name`. Pass this full path to `docker_paths.go`; the repo prefix is stripped by `GetViolations` as needed.
 8. **Malicious watch errors must be visible** — log malicious watch query failures at `Warn`, not `Debug`. In github-md mode, log level is set to `ERROR`; `Debug` messages are completely invisible, leaving the malicious lookup silently empty.
-9. **`--platform linux` (no slash) sets OS, not arch** — the `--platform` flag without a slash sets `conf.OS = conf.Platform` and leaves `arch` empty. A single word is interpreted as OS only (e.g., `linux`), not architecture.
+9. **`--platform linux` (no slash) sets OS, not arch** — the `--platform` flag value is stored verbatim in `conf.Platform`; at runtime, local vars `osFilter` and `arch` are derived by splitting on `/`. A single word (e.g., `linux`) sets `osFilter` to that word and leaves `arch` empty — any platform with that OS matches regardless of architecture.
 10. **CVE properties can be string or array** — Xray may return `"cve"` as a JSON string or `[]string`. Use a type switch (see `xray_sdk.go`) to handle both; a bare `.(string)` assertion silently drops array-form CVEs.
 11. **v2 summary API requires project-key prefix in path** — `GetSummaryV2` paths must be formatted as `<projectKey>/<repo>/<image>/<tag>/manifest.json`. Omitting the project key prefix causes the API to return no results silently.
-12. **v2 summary API uses list.manifest.json for multi-platform images** — pass the top-level `list.manifest.json` path, not the per-platform `sha256__<digest>/manifest.json` sub-paths. The sub-paths are Artifactory storage paths; the v2 API expects the manifest index path.
+12. **Multi-platform v2 summary query is two-step** — the code first tries per-platform `sha256__<digest>/manifest.json` paths with platform labels. If the response returns `total=0` (Xray may not index sub-paths separately), it retries with the top-level `list.manifest.json` path and no labels, then bulk-assigns all platform labels to every returned finding. See also Gotcha #16.
 13. **Security Findings summary line includes fixable count** — the collapsible `<details>` summary reads `Security Findings (N | M fixable)`. The fixable count comes from `SummaryIssue.Fixable` (true when any affected component has a known fix version in the v2 summary response). Both counts respect the active `--min-severity` filter.
 14. **Four-tier GitHub MD banner** — `generateSecurityBanner` renders [!CAUTION] red for malicious content (highest priority), [!CAUTION] orange for critical CVEs with no malicious, [!WARNING] yellow for non-critical CVEs, and [!NOTE] green for clean. Banner tier is determined from pre-counted report fields (`MaliciousIssues`, `CriticalCount`, `TotalIssues`) — not from `--min-severity`.
 15. **`SummaryIssue.Platforms` carries per-finding attribution** — `GetSummaryV2` accepts a `labels []string` parallel to `paths []string`. For multi-platform images, each finding accumulates the labels from every artifact where it appeared. If `labels` is nil (fallback call with list.manifest.json), all platform labels from the original per-platform query are applied to every finding.
 16. **Multi-platform v2 fallback** — if a per-platform sha256__ v2 query returns total=0 (Xray may not index sub-paths separately), `generateVulnerabilityReport` retries with the top-level `list.manifest.json` path and `labels=nil`, then bulk-assigns all platform labels to every returned finding.
+17. **`table` is the default output format** — changed from `json`. Any pipeline that relied on stdout being JSON by default must now pass `--output json` explicitly.
+18. **`--debug` flag replaces `--debug-paths`** — enables DEBUG-level SDK logging for troubleshooting artifact discovery. The old `--debug-paths` flag no longer exists; update any scripts that reference it.
+19. **`--save-output` suppresses all console output** — when set, `outputReport(os.Stdout, ...)` is skipped entirely; only the "Saved: …" confirmation line prints. Files are written before the `--fail-on-vuln` check, so both the file and the non-zero exit code are produced together when both flags are set. Whitespace around format names is trimmed (`"json, github-md"` is equivalent to `"json,github-md"`). Unsupported format names return an error immediately.

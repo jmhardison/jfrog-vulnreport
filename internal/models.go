@@ -51,18 +51,19 @@ type Descriptor struct {
 // CheckConfiguration holds all parameters for a vulnerability check invocation.
 // Populated from CLI flags in commands/check.go and passed through the call chain.
 type CheckConfiguration struct {
-	ImageName         string // Full image reference (e.g., "docker-local/myimage:latest")
+	ImageName         string // Full image reference (e.g., "docker-local/myimage:latest" or "myimage:latest")
 	ServerId          string // JFrog CLI server configuration ID
 	Platform          string // Platform filter: "os/arch" (e.g., "linux/amd64") or OS only (e.g., "linux")
 	FailOnVuln        bool   // Exit non-zero if any vulnerabilities found
 	Output            string // Output format: "json" or "github-md"
 	Silent            bool   // Suppress all log output (used by github-md mode)
 	MinSeverity       string // Minimum severity to display: Low, Medium, High, Critical, Malicious
-	DebugPaths        bool   // Log artifact discovery paths for troubleshooting
+	Debug             bool   // Enable debug-level logging (set by --debug flag)
 	DockerRegistryURL string // Override URL for Docker registry (for direct manifest fetch)
 	ProjectKey        string // Xray project key for violation queries (defaults to "default")
 	MaliciousWatchName string // Required: Xray watch that defines malicious packages (source of truth for malicious detection)
 	NoFindings         bool   // Suppress Security Findings table in output (summary and malicious findings still shown)
+	SaveOutput         string // Comma-separated formats to save to files: "json" and/or "github-md"
 	AppName            string // Plugin name, set by main.go and threaded through for footer rendering
 	AppVersion         string // Plugin version, set by main.go and threaded through for footer rendering
 }
@@ -103,15 +104,18 @@ type DockerRegistryClient struct {
 }
 
 // EnhancedVulnerabilityReport is the JSON output format — a flattened, aggregated view of
-// VulnerabilityReport suitable for machine consumption. Includes per-finding malicious status
-// and issue type counts derived from the Violations API response.
+// VulnerabilityReport suitable for machine consumption. Includes per-finding detail from the
+// Xray v2 summary API and malicious issue IDs from the malicious watch.
 type EnhancedVulnerabilityReport struct {
-	ImageName     string                 `json:"imageName"`
-	GeneratedAt   string                 `json:"generatedAt"`
-	ImageNotFound bool                   `json:"imageNotFound,omitempty"`
-	Summary       SecuritySummary        `json:"summary"`
-	IssueTypes    map[string]int         `json:"issueTypes"` // Issue type → count (CVE, Malware, etc.)
-	Platforms     []EnhancedPlatformInfo `json:"platforms"`
+	ImageName       string                 `json:"imageName"`
+	GeneratedAt     string                 `json:"generatedAt"`
+	PluginName      string                 `json:"pluginName,omitempty"`
+	PluginVersion   string                 `json:"pluginVersion,omitempty"`
+	ImageNotFound   bool                   `json:"imageNotFound,omitempty"`
+	Summary         SecuritySummary        `json:"summary"`
+	MaliciousIssues []string               `json:"maliciousIssues,omitempty"`
+	Platforms       []EnhancedPlatformInfo `json:"platforms"`
+	Findings        []EnhancedFinding      `json:"findings,omitempty"`
 }
 
 // SecuritySummary provides aggregate counts across all platforms. MaliciousCount is derived from
@@ -122,25 +126,23 @@ type SecuritySummary struct {
 	HighCount      int `json:"highCount"`
 	MediumCount    int `json:"mediumCount"`
 	LowCount       int `json:"lowCount"`
+	FixableCount   int `json:"fixableCount"`
 	MaliciousCount int `json:"maliciousCount"`
 	PlatformCount  int `json:"platformCount"`
 }
 
 // EnhancedPlatformInfo is a flattened representation of PlatformVulnerabilityInfo for JSON output.
 type EnhancedPlatformInfo struct {
-	Platform      Platform         `json:"platform"`
-	FindingsCount int              `json:"findingsCount"`
-	LayerCount    int              `json:"layerCount"`
-	SizeMB        float64          `json:"sizeMB"`
-	Findings      []CompactFinding `json:"findings"`
+	Platform Platform `json:"platform"`
 }
 
-// CompactFinding is a single vulnerability finding in the enhanced report. Malicious indicates
-// whether the issue ID was found in the --malicious-watch-name watch (source of truth).
-type CompactFinding struct {
-	IssueId   string `json:"issueId"`
-	Type      string `json:"type"`        // Issue type: CVE, Malware, License, etc.
-	Severity  string `json:"severity"`    // Low, Medium, High, Critical
-	Malicious bool   `json:"malicious"`   // True if issue ID was found in the --malicious-watch-name watch
-	CveCount  int    `json:"cveCount"`    // Number of CVEs associated with this finding
+// EnhancedFinding is a single vulnerability finding in the JSON report, populated from the
+// Xray v2 summary API. Malicious is true when the issue ID was returned by the --malicious-watch-name watch.
+type EnhancedFinding struct {
+	IssueID       string   `json:"issueId"`
+	Severity      string   `json:"severity"`
+	JFrogSeverity string   `json:"jfrogSeverity,omitempty"`
+	Fixable       bool     `json:"fixable"`
+	Malicious     bool     `json:"malicious"`
+	Platforms     []string `json:"platforms,omitempty"`
 }
