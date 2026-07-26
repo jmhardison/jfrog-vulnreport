@@ -19,8 +19,8 @@ type dockerPath struct {
 
 // rtArtifact represents an artifact from Artifactory search results.
 type rtArtifact struct {
-	Path   string            `json:"path"`
-	SHA256 string            `json:"sha256"`
+	Path   string              `json:"path"`
+	SHA256 string              `json:"sha256"`
 	Props  map[string][]string `json:"props"`
 }
 

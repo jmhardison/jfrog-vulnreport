@@ -9,7 +9,6 @@ import (
 	"github.com/jfrog/jfrog-client-go/xray/services"
 )
 
-
 // DockerManifest represents a single-platform Docker image manifest (v2 schema).
 // Stored in Artifactory under <repo>/<image>/<tag>/manifest.json.
 type DockerManifest struct {
@@ -51,16 +50,16 @@ type Descriptor struct {
 // CheckConfiguration holds all parameters for a vulnerability check invocation.
 // Populated from CLI flags in commands/check.go and passed through the call chain.
 type CheckConfiguration struct {
-	ImageName         string // Full image reference (e.g., "docker-local/myimage:latest" or "myimage:latest")
-	ServerId          string // JFrog CLI server configuration ID
-	Platform          string // Platform filter: "os/arch" (e.g., "linux/amd64") or OS only (e.g., "linux")
-	FailOnVuln        bool   // Exit non-zero if any vulnerabilities found
-	Output            string // Output format: "json" or "github-md"
-	Silent            bool   // Suppress all log output (used by github-md mode)
-	MinSeverity       string // Minimum severity to display: Low, Medium, High, Critical, Malicious
-	Debug             bool   // Enable debug-level logging (set by --debug flag)
-	DockerRegistryURL string // Override URL for Docker registry (for direct manifest fetch)
-	ProjectKey        string // Xray project key for violation queries (defaults to "default")
+	ImageName          string // Full image reference (e.g., "docker-local/myimage:latest" or "myimage:latest")
+	ServerId           string // JFrog CLI server configuration ID
+	Platform           string // Platform filter: "os/arch" (e.g., "linux/amd64") or OS only (e.g., "linux")
+	FailOnVuln         bool   // Exit non-zero if any vulnerabilities found
+	Output             string // Output format: "json" or "github-md"
+	Silent             bool   // Suppress all log output (used by github-md mode)
+	MinSeverity        string // Minimum severity to display: Low, Medium, High, Critical, Malicious
+	Debug              bool   // Enable debug-level logging (set by --debug flag)
+	DockerRegistryURL  string // Override URL for Docker registry (for direct manifest fetch)
+	ProjectKey         string // Xray project key for violation queries (defaults to "default")
 	MaliciousWatchName string // Required: Xray watch that defines malicious packages (source of truth for malicious detection)
 	NoFindings         bool   // Suppress Security Findings table in output (summary and malicious findings still shown)
 	SaveOutput         string // Comma-separated formats to save to files: "json" and/or "github-md"
@@ -71,18 +70,18 @@ type CheckConfiguration struct {
 // VulnerabilityReport is the core report structure returned by generateVulnerabilityReport.
 // Contains per-platform vulnerability groups with raw services.Vulnerability data from Xray.
 type VulnerabilityReport struct {
-	ImageName        string                      `json:"imageName"`
-	Platforms        []PlatformVulnerabilityInfo `json:"platforms"`
-	TotalIssues      int                         `json:"totalIssues"`
-	CriticalCount    int                         `json:"criticalCount"`
-	HighCount        int                         `json:"highCount"`
-	MediumCount      int                         `json:"mediumCount"`
-	LowCount         int                         `json:"lowCount"`
-	GeneratedAt      string                      `json:"generatedAt"`
-	IsMultiPlatform   bool           `json:"isMultiPlatform,omitempty"` // true if list.manifest.json was expanded into per-platform entries
-	MaliciousIssues   []string       `json:"maliciousIssues,omitempty"` // issue IDs returned by the malicious watch
-	SummaryIssues     []SummaryIssue `json:"-"`                         // per-issue detail from v2 summary API; not serialized
-	ImageNotFound     bool           `json:"imageNotFound,omitempty"`   // true when no Artifactory artifacts were discovered for the image
+	ImageName       string                      `json:"imageName"`
+	Platforms       []PlatformVulnerabilityInfo `json:"platforms"`
+	TotalIssues     int                         `json:"totalIssues"`
+	CriticalCount   int                         `json:"criticalCount"`
+	HighCount       int                         `json:"highCount"`
+	MediumCount     int                         `json:"mediumCount"`
+	LowCount        int                         `json:"lowCount"`
+	GeneratedAt     string                      `json:"generatedAt"`
+	IsMultiPlatform bool                        `json:"isMultiPlatform,omitempty"` // true if list.manifest.json was expanded into per-platform entries
+	MaliciousIssues []string                    `json:"maliciousIssues,omitempty"` // issue IDs returned by the malicious watch
+	SummaryIssues   []SummaryIssue              `json:"-"`                         // per-issue detail from v2 summary API; not serialized
+	ImageNotFound   bool                        `json:"imageNotFound,omitempty"`   // true when no Artifactory artifacts were discovered for the image
 }
 
 // PlatformVulnerabilityInfo groups vulnerabilities discovered for a single platform variant.

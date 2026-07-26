@@ -174,8 +174,6 @@ func TestFilterManifestsByPlatform(t *testing.T) {
 	}
 }
 
-
-
 func TestGetDigestPaths(t *testing.T) {
 	tests := []struct {
 		name          string
@@ -251,7 +249,6 @@ func TestIsValidManifestContent(t *testing.T) {
 	}
 }
 
-
 func TestBuildXrayAPIEndpoint(t *testing.T) {
 	// Test URL construction logic (previously via buildXrayAPIEndpoint helper).
 	// The rule: if base ends with /xray, append path directly; otherwise insert /xray before path.
@@ -268,7 +265,6 @@ func TestBuildXrayAPIEndpoint(t *testing.T) {
 		"https://example.jfrog.io"+"/xray"+"/api/v2/summary/artifact",
 	)
 }
-
 
 // TestGithubMDOutputNoLogLeakage verifies that github-md stdout contains only markdown lines —
 // no JFrog SDK log lines (which look like "HH:MM:SS [🔵Info] ..."). This guards against
@@ -504,7 +500,7 @@ func TestViolationWithMaliciousExtractsFromResponse(t *testing.T) {
 	}`)
 
 	type violationResponse struct {
-		TotalViolations int    `json:"total_violations"`
+		TotalViolations int             `json:"total_violations"`
 		Violations      []xrayViolation `json:"violations"`
 	}
 	var resp violationResponse
@@ -565,17 +561,17 @@ func TestSeverityMeetsMin(t *testing.T) {
 		minSeverity string
 		expected    bool
 	}{
-		{"Critical", "", true},          // empty min passes everything
-		{"Low", "Low", true},            // equal rank passes
-		{"Low", "Medium", false},        // too low
-		{"High", "Critical", false},     // below threshold
-		{"Critical", "High", true},      // above threshold
-		{"Malicious", "Critical", true}, // rank -1 ≤ 0
-		{"Low", "Malicious", false},     // rank 3 > -1
-		{"Critical", "Malicious", false},// rank 0 > -1
-		{"Malicious", "Malicious", true},// exact match
-		{"Low", "Unknown", true},        // unrecognized min → pass all
-		{"Unknown", "Low", true},        // unrecognized severity → pass through
+		{"Critical", "", true},           // empty min passes everything
+		{"Low", "Low", true},             // equal rank passes
+		{"Low", "Medium", false},         // too low
+		{"High", "Critical", false},      // below threshold
+		{"Critical", "High", true},       // above threshold
+		{"Malicious", "Critical", true},  // rank -1 ≤ 0
+		{"Low", "Malicious", false},      // rank 3 > -1
+		{"Critical", "Malicious", false}, // rank 0 > -1
+		{"Malicious", "Malicious", true}, // exact match
+		{"Low", "Unknown", true},         // unrecognized min → pass all
+		{"Unknown", "Low", true},         // unrecognized severity → pass through
 	}
 	for _, tc := range cases {
 		name := tc.severity + "_min_" + tc.minSeverity
@@ -863,7 +859,7 @@ func TestOutputMarkdownReport_FindingsTableSorting(t *testing.T) {
 		GeneratedAt: "2026-01-01T00:00:00Z",
 		TotalIssues: 3,
 		SummaryIssues: []SummaryIssue{
-			{IssueID: "XRAY-200", Severity: "High"},     // added out of severity order
+			{IssueID: "XRAY-200", Severity: "High"}, // added out of severity order
 			{IssueID: "XRAY-100", Severity: "Critical"},
 			{IssueID: "XRAY-101", Severity: "Critical"}, // same severity — sort by ID
 		},

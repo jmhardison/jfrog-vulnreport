@@ -16,16 +16,16 @@ type CheckCommand struct {
 	artSvc  *helperinternal.ArtifactoryService
 
 	// Flag values — set by fluent setters from main.go Action callback.
-	Image            string // Image reference (e.g., "myimage:latest" or "docker-local/myimage:latest")
-	Repo             string // Artifactory repository key passed to ParseImageName; defaults to "docker-local" when empty
-	ServerId         string // JFrog CLI server configuration ID
-	Platform         string // Platform filter: "os/arch" (e.g., "linux/amd64") or OS only (e.g., "linux")
-	FailOnVuln       bool   // Exit non-zero if any vulnerabilities found
-	Output           string // Output format: "json" or "github-md"
-	MinSeverity      string // Minimum severity to display: Low, Medium, High, Critical, Malicious
-	Debug            bool   // Enable debug-level logging
-	DockerRegistryURL string // Override URL for Docker registry (for direct manifest fetch)
-	ProjectKey       string // Xray project key for violation queries (defaults to "default")
+	Image              string // Image reference (e.g., "myimage:latest" or "docker-local/myimage:latest")
+	Repo               string // Artifactory repository key passed to ParseImageName; defaults to "docker-local" when empty
+	ServerId           string // JFrog CLI server configuration ID
+	Platform           string // Platform filter: "os/arch" (e.g., "linux/amd64") or OS only (e.g., "linux")
+	FailOnVuln         bool   // Exit non-zero if any vulnerabilities found
+	Output             string // Output format: "json" or "github-md"
+	MinSeverity        string // Minimum severity to display: Low, Medium, High, Critical, Malicious
+	Debug              bool   // Enable debug-level logging
+	DockerRegistryURL  string // Override URL for Docker registry (for direct manifest fetch)
+	ProjectKey         string // Xray project key for violation queries (defaults to "default")
 	MaliciousWatchName string // Xray watch that defines malicious packages (source of truth)
 	NoFindings         bool   // Suppress Security Findings table in output
 	SaveOutput         string // Comma-separated formats to save to files: "json" and/or "github-md"
@@ -53,21 +53,27 @@ func (c *CheckCommand) SetArtifactoryService(svc *helperinternal.ArtifactoryServ
 }
 
 // Fluent setters for flag values — each returns *CheckCommand for chaining.
-func (c *CheckCommand) SetImage(v string) *CheckCommand          { c.Image = v; return c }
-func (c *CheckCommand) SetRepo(v string) *CheckCommand           { c.Repo = v; return c }
-func (c *CheckCommand) SetServerId(v string) *CheckCommand       { c.ServerId = v; return c }
-func (c *CheckCommand) SetPlatform(v string) *CheckCommand       { c.Platform = v; return c }
-func (c *CheckCommand) SetFailOnVuln(v bool) *CheckCommand       { c.FailOnVuln = v; return c }
-func (c *CheckCommand) SetOutput(v string) *CheckCommand         { c.Output = v; return c }
-func (c *CheckCommand) SetMinSeverity(v string) *CheckCommand    { c.MinSeverity = v; return c }
-func (c *CheckCommand) SetDebug(v bool) *CheckCommand            { c.Debug = v; return c }
-func (c *CheckCommand) SetDockerRegistryURL(v string) *CheckCommand { c.DockerRegistryURL = v; return c }
-func (c *CheckCommand) SetProjectKey(v string) *CheckCommand     { c.ProjectKey = v; return c }
-func (c *CheckCommand) SetMaliciousWatchName(v string) *CheckCommand { c.MaliciousWatchName = v; return c }
-func (c *CheckCommand) SetNoFindings(v bool) *CheckCommand           { c.NoFindings = v; return c }
-func (c *CheckCommand) SetSaveOutput(v string) *CheckCommand         { c.SaveOutput = v; return c }
-func (c *CheckCommand) SetAppName(v string) *CheckCommand            { c.AppName = v; return c }
-func (c *CheckCommand) SetAppVersion(v string) *CheckCommand         { c.AppVersion = v; return c }
+func (c *CheckCommand) SetImage(v string) *CheckCommand       { c.Image = v; return c }
+func (c *CheckCommand) SetRepo(v string) *CheckCommand        { c.Repo = v; return c }
+func (c *CheckCommand) SetServerId(v string) *CheckCommand    { c.ServerId = v; return c }
+func (c *CheckCommand) SetPlatform(v string) *CheckCommand    { c.Platform = v; return c }
+func (c *CheckCommand) SetFailOnVuln(v bool) *CheckCommand    { c.FailOnVuln = v; return c }
+func (c *CheckCommand) SetOutput(v string) *CheckCommand      { c.Output = v; return c }
+func (c *CheckCommand) SetMinSeverity(v string) *CheckCommand { c.MinSeverity = v; return c }
+func (c *CheckCommand) SetDebug(v bool) *CheckCommand         { c.Debug = v; return c }
+func (c *CheckCommand) SetDockerRegistryURL(v string) *CheckCommand {
+	c.DockerRegistryURL = v
+	return c
+}
+func (c *CheckCommand) SetProjectKey(v string) *CheckCommand { c.ProjectKey = v; return c }
+func (c *CheckCommand) SetMaliciousWatchName(v string) *CheckCommand {
+	c.MaliciousWatchName = v
+	return c
+}
+func (c *CheckCommand) SetNoFindings(v bool) *CheckCommand   { c.NoFindings = v; return c }
+func (c *CheckCommand) SetSaveOutput(v string) *CheckCommand { c.SaveOutput = v; return c }
+func (c *CheckCommand) SetAppName(v string) *CheckCommand    { c.AppName = v; return c }
+func (c *CheckCommand) SetAppVersion(v string) *CheckCommand { c.AppVersion = v; return c }
 
 // Exec runs the check pipeline with all configured parameters.
 // When xraySvc and artSvc are both set (via SetXrayService/SetArtifactoryService),
