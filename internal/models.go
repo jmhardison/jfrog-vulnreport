@@ -63,6 +63,7 @@ type CheckConfiguration struct {
 	ProjectKey        string // Xray project key for violation queries (defaults to "default")
 	MaliciousWatchName string // Required: Xray watch that defines malicious packages (source of truth for malicious detection)
 	NoFindings         bool   // Suppress Security Findings table in output (summary and malicious findings still shown)
+	SaveOutput         string // Comma-separated formats to save to files: "json" and/or "github-md"
 	AppName            string // Plugin name, set by main.go and threaded through for footer rendering
 	AppVersion         string // Plugin version, set by main.go and threaded through for footer rendering
 }

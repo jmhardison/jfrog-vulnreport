@@ -40,6 +40,7 @@ func TestNewCheckCommand(t *testing.T) {
 	assert.Empty(t, cmd.MaliciousWatchName)
 	assert.False(t, cmd.FailOnVuln)
 	assert.False(t, cmd.NoFindings)
+	assert.Empty(t, cmd.SaveOutput)
 }
 
 func TestCheckCommand_FluentSetters(t *testing.T) {
@@ -56,6 +57,7 @@ func TestCheckCommand_FluentSetters(t *testing.T) {
 		SetProjectKey("my-project").
 		SetMaliciousWatchName("org-malicious-watch").
 		SetNoFindings(true).
+		SetSaveOutput("json,github-md").
 		SetAppName("vulnreport").
 		SetAppVersion("vtest")
 
@@ -71,6 +73,7 @@ func TestCheckCommand_FluentSetters(t *testing.T) {
 	assert.Equal(t, "my-project", cmd.ProjectKey)
 	assert.Equal(t, "org-malicious-watch", cmd.MaliciousWatchName)
 	assert.True(t, cmd.NoFindings)
+	assert.Equal(t, "json,github-md", cmd.SaveOutput)
 	assert.Equal(t, "vulnreport", cmd.AppName)
 	assert.Equal(t, "vtest", cmd.AppVersion)
 }
@@ -107,7 +110,7 @@ func TestGetCheckFlags_AllFlagsPresent(t *testing.T) {
 	expected := []string{
 		"repo", "server-id", "platform", "fail-on-vuln", "output",
 		"min-severity", "debug", "docker-registry-url",
-		"project-key", "malicious-watch-name", "no-findings",
+		"project-key", "malicious-watch-name", "no-findings", "save-output",
 	}
 	for _, name := range expected {
 		assert.True(t, registered[name], "flag %q must be registered in getCheckFlags()", name)

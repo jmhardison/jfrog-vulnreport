@@ -28,6 +28,7 @@ type CheckCommand struct {
 	ProjectKey       string // Xray project key for violation queries (defaults to "default")
 	MaliciousWatchName string // Xray watch that defines malicious packages (source of truth)
 	NoFindings         bool   // Suppress Security Findings table in output
+	SaveOutput         string // Comma-separated formats to save to files: "json" and/or "github-md"
 	AppName            string // Plugin name passed from main.go for footer rendering
 	AppVersion         string // Plugin version passed from main.go for footer rendering
 }
@@ -64,6 +65,7 @@ func (c *CheckCommand) SetDockerRegistryURL(v string) *CheckCommand { c.DockerRe
 func (c *CheckCommand) SetProjectKey(v string) *CheckCommand     { c.ProjectKey = v; return c }
 func (c *CheckCommand) SetMaliciousWatchName(v string) *CheckCommand { c.MaliciousWatchName = v; return c }
 func (c *CheckCommand) SetNoFindings(v bool) *CheckCommand           { c.NoFindings = v; return c }
+func (c *CheckCommand) SetSaveOutput(v string) *CheckCommand         { c.SaveOutput = v; return c }
 func (c *CheckCommand) SetAppName(v string) *CheckCommand            { c.AppName = v; return c }
 func (c *CheckCommand) SetAppVersion(v string) *CheckCommand         { c.AppVersion = v; return c }
 
@@ -97,6 +99,7 @@ func (c *CheckCommand) Exec() error {
 			ProjectKey:         projectKey,
 			MaliciousWatchName: c.MaliciousWatchName,
 			NoFindings:         c.NoFindings,
+			SaveOutput:         c.SaveOutput,
 			AppName:            c.AppName,
 			AppVersion:         c.AppVersion,
 		}
@@ -136,6 +139,9 @@ func (c *CheckCommand) Exec() error {
 		ctx.AddStringFlag("malicious-watch-name", c.MaliciousWatchName)
 	}
 	ctx.AddBoolFlag("no-findings", c.NoFindings)
+	if c.SaveOutput != "" {
+		ctx.AddStringFlag("save-output", c.SaveOutput)
+	}
 
 	return helperinternal.RunCheckCommand(ctx, c.AppName, c.AppVersion)
 }
@@ -180,6 +186,7 @@ func checkCmd(c *components.Context, appName, appVersion string) error {
 		SetProjectKey(c.GetStringFlagValue("project-key")).
 		SetMaliciousWatchName(c.GetStringFlagValue("malicious-watch-name")).
 		SetNoFindings(c.GetBoolFlagValue("no-findings")).
+		SetSaveOutput(c.GetStringFlagValue("save-output")).
 		SetAppName(appName).
 		SetAppVersion(appVersion)
 
@@ -243,6 +250,10 @@ func getCheckFlags() []components.Flag {
 			"no-findings",
 			"Suppress the Security Findings table in output. Summary counts and malicious findings are still shown.",
 			components.WithBoolDefaultValue(false),
+		),
+		components.NewStringFlag(
+			"save-output",
+			"Comma-separated formats to save to files instead of stdout: 'json' (→ vulnreport.json) and/or 'github-md' (→ vulnreport.md).",
 		),
 	}
 }
