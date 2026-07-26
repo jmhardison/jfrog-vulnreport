@@ -1,5 +1,10 @@
 # Release Notes
 
+## v1.0.0
+
+- feat: prep for v1 (#10)
+
+
 ## v0.1.10
 
 - feat: add `table` output format (Unicode box-drawing tables) as the new default — `--output json` now required to get JSON output when not specified
