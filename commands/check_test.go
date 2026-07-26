@@ -19,6 +19,12 @@ func TestGetCheckCommand_Wiring(t *testing.T) {
 	assert.NotNil(t, cmd.Action)
 }
 
+func TestGetCheckCommand_AliasRegistered(t *testing.T) {
+	cmd := GetCheckCommand("vulnreport", "vtest")
+	assert.Equal(t, "check", cmd.Name, "primary command name must be 'check'")
+	assert.Contains(t, cmd.Aliases, "ck", "'ck' alias must be registered so both 'check' and 'ck' dispatch the same action")
+}
+
 func TestCheckCmd_RequiresImageArgument(t *testing.T) {
 	err := checkCmd(&components.Context{}, "", "")
 	assert.Error(t, err)

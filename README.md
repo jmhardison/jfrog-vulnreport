@@ -35,7 +35,7 @@ jf plugin uninstall vulnreport
 
 ## Command
 
-### `check`
+### `check` (alias: `ck`)
 
 Reads existing vulnerability scan results for a Docker image from Xray and outputs a consolidated report.
 
@@ -44,6 +44,7 @@ Reads existing vulnerability scan results for a Docker image from Xray and outpu
 ```bash
 jf vulnreport check <image:tag> [flags]
 jf vulnreport check <repo/image:tag> [flags]
+jf vulnreport ck <image:tag> [flags]
 ```
 
 **Arguments**
@@ -60,13 +61,21 @@ jf vulnreport check <repo/image:tag> [flags]
 | `--repo` | No | `docker-local` | Artifactory repository key containing the Docker image. Used when the image argument does not include a repository prefix. |
 | `--server-id` | No | default server | JFrog CLI server configuration ID |
 | `--output` | No | `table` | Output format: `table`, `json`, or `github-md` |
-| `--min-severity` | No | — | Minimum severity to include in findings: `Low`, `Medium`, `High`, `Critical`, `Malicious` |
+| `--min-severity` | No | — | Minimum severity to include in the Security Findings table: `Low`, `Medium`, `High`, `Critical`, `Malicious`. The Security Summary always shows all severity counts regardless of this filter. |
 | `--platform` | No | all platforms | Filter by platform — `os/arch` (e.g., `linux/amd64`) or OS only (e.g., `linux`) |
 | `--fail-on-vuln` | No | `false` | Exit non-zero if any vulnerabilities are found |
 | `--no-findings` | No | `false` | Suppress the Security Findings detail table (summary counts and malicious findings still shown) |
 | `--project-key` | No | `default` | Xray project key for violation queries — only needed when the watch is scoped to a JFrog project |
 | `--docker-registry-url` | No | derived from server | Override the Docker registry base URL |
 | `--debug` | No | `false` | Enable debug-level logging for troubleshooting |
+
+**Log verbosity**
+
+| Condition | Log level | Effect |
+|---|---|---|
+| `--debug` | DEBUG | Full SDK trace, artifact discovery details, API call details |
+| default (`table` or `json`) | WARN | Warnings and errors only — keeps stdout clean for piping |
+| `--output github-md` | ERROR | All non-error log output suppressed — only markdown reaches stdout |
 
 **Examples**
 
