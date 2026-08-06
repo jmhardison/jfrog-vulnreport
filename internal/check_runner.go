@@ -414,6 +414,13 @@ func outputTableReport(w io.Writer, report *VulnerabilityReport, maliciousLookup
 
 	// --- Malicious Findings table ---
 	if maliciousCount > 0 {
+		cveByIssue := make(map[string][]string, len(report.SummaryIssues))
+		for _, si := range report.SummaryIssues {
+			if len(si.CVEIDs) > 0 {
+				cveByIssue[si.IssueID] = si.CVEIDs
+			}
+		}
+
 		sortedMal := make([]string, len(report.MaliciousIssues))
 		copy(sortedMal, report.MaliciousIssues)
 		sort.Strings(sortedMal)
@@ -422,9 +429,13 @@ func outputTableReport(w io.Writer, report *VulnerabilityReport, maliciousLookup
 		malT := table.NewWriter()
 		malT.SetOutputMirror(ew)
 		malT.SetStyle(table.StyleLight)
-		malT.AppendHeader(table.Row{"XRAY-ID", "SEVERITY"})
+		malT.AppendHeader(table.Row{"XRAY-ID", "CVE ID", "SEVERITY"})
 		for _, id := range sortedMal {
-			malT.AppendRow(table.Row{id, severityColor("Malicious", colors)})
+			cveIDs := strings.Join(cveByIssue[id], ", ")
+			if cveIDs == "" {
+				cveIDs = "-"
+			}
+			malT.AppendRow(table.Row{id, cveIDs, severityColor("Malicious", colors)})
 		}
 		malT.Render()
 		ew.writeln()
@@ -457,7 +468,7 @@ func outputTableReport(w io.Writer, report *VulnerabilityReport, maliciousLookup
 			findT := table.NewWriter()
 			findT.SetOutputMirror(ew)
 			findT.SetStyle(table.StyleLight)
-			findT.AppendHeader(table.Row{"XRAY-ID", "SEVERITY", "JFROG SEVERITY", "FIXABLE", "PLATFORMS"})
+			findT.AppendHeader(table.Row{"XRAY-ID", "CVE ID", "SEVERITY", "JFROG SEVERITY", "FIXABLE", "PLATFORMS"})
 			for _, si := range filtered {
 				fixable := "No"
 				if si.Fixable {
@@ -471,12 +482,17 @@ func outputTableReport(w io.Writer, report *VulnerabilityReport, maliciousLookup
 				if platforms == "" {
 					platforms = "-"
 				}
+				cveIDs := strings.Join(si.CVEIDs, ", ")
+				if cveIDs == "" {
+					cveIDs = "-"
+				}
 				displaySev := si.Severity
 				if maliciousLookup[si.IssueID] {
 					displaySev = "Malicious"
 				}
 				findT.AppendRow(table.Row{
 					si.IssueID,
+					cveIDs,
 					severityColor(displaySev, colors),
 					severityColor(jfrogSev, colors),
 					fixable,
@@ -539,6 +555,7 @@ func convertToEnhancedReport(report *VulnerabilityReport, maliciousLookup map[st
 			IssueID:       si.IssueID,
 			Severity:      si.Severity,
 			JFrogSeverity: si.JFrogSeverity,
+			CVEIDs:        si.CVEIDs,
 			Fixable:       si.Fixable,
 			Malicious:     maliciousLookup[si.IssueID],
 			Platforms:     si.Platforms,
@@ -634,17 +651,28 @@ func outputMarkdownReport(w io.Writer, report *VulnerabilityReport, maliciousLoo
 	}
 
 	if maliciousCount > 0 {
+		cveByIssue := make(map[string][]string, len(report.SummaryIssues))
+		for _, si := range report.SummaryIssues {
+			if len(si.CVEIDs) > 0 {
+				cveByIssue[si.IssueID] = si.CVEIDs
+			}
+		}
+
 		ew.writeln()
 		ew.writeln("---")
 		ew.writeln()
 		ew.writef("## :bangbang: Malicious Findings (%d)\n", maliciousCount)
-		ew.writeln("| Xray ID | Severity |")
-		ew.writeln("|---------|----------|")
+		ew.writeln("| Xray ID | CVE ID | Severity |")
+		ew.writeln("|---------|--------|----------|")
 		sortedMal := make([]string, len(report.MaliciousIssues))
 		copy(sortedMal, report.MaliciousIssues)
 		sort.Strings(sortedMal)
 		for _, id := range sortedMal {
-			ew.writef("| %s | %s |\n", id, severityLabel("Malicious"))
+			cveIDsStr := strings.Join(cveByIssue[id], "<br>")
+			if cveIDsStr == "" {
+				cveIDsStr = "-"
+			}
+			ew.writef("| %s | %s | %s |\n", id, cveIDsStr, severityLabel("Malicious"))
 		}
 		ew.writeln()
 		ew.writeln("---")
@@ -677,8 +705,8 @@ func outputMarkdownReport(w io.Writer, report *VulnerabilityReport, maliciousLoo
 			ew.writeln("---")
 			ew.writeln()
 			ew.writef("<details>\n<summary>Security Findings (%d | %d fixable) — click to expand</summary>\n\n", len(filtered), fixableCount)
-			ew.writeln("| XRAY-ID | SEVERITY | JFROG SEVERITY | FIXABLE | PLATFORMS |")
-			ew.writeln("|---------|----------|----------------|---------|-----------|")
+			ew.writeln("| XRAY-ID | CVE ID | SEVERITY | JFROG SEVERITY | FIXABLE | PLATFORMS |")
+			ew.writeln("|---------|--------|----------|----------------|---------|-----------|")
 			for _, si := range filtered {
 				fixable := "No"
 				if si.Fixable {
@@ -688,8 +716,13 @@ func outputMarkdownReport(w io.Writer, report *VulnerabilityReport, maliciousLoo
 				if platformsStr == "" {
 					platformsStr = "-"
 				}
-				ew.writef("| %s | %s | %s | %s | %s |\n",
+				cveIDsStr := strings.Join(si.CVEIDs, "<br>")
+				if cveIDsStr == "" {
+					cveIDsStr = "-"
+				}
+				ew.writef("| %s | %s | %s | %s | %s | %s |\n",
 					si.IssueID,
+					cveIDsStr,
 					severityLabel(si.Severity),
 					jfrogSeverityLabel(si.JFrogSeverity, si.Severity),
 					fixable,

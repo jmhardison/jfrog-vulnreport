@@ -119,6 +119,7 @@ type SummaryIssue struct {
 	JFrogSeverity string   // JFrog Research severity (may differ from standard); empty if not provided
 	Fixable       bool     // True if at least one affected component has a known fix version
 	Platforms     []string // Platform labels where this issue was found (e.g. ["linux/amd64", "linux/arm64"])
+	CVEIDs        []string // CVE identifiers associated with this issue (e.g. ["CVE-2021-12345"])
 }
 
 // GetSummaryV2 queries POST /api/v2/summary/artifact with a list of artifact paths
@@ -164,11 +165,15 @@ func (xs *XrayService) GetSummaryV2(paths, labels []string) (SeverityCounts, []S
 	type v2Component struct {
 		FixedVersions []string `json:"fixed_versions"`
 	}
+	type v2Cve struct {
+		CVE string `json:"cve"`
+	}
 	type v2Issue struct {
 		IssueID             string          `json:"issue_id"`
 		Severity            string          `json:"severity"`
 		ExtendedInformation *v2ExtendedInfo `json:"extended_information"`
 		Components          []v2Component   `json:"components"`
+		Cves                []v2Cve         `json:"cves"`
 	}
 	type v2Artifact struct {
 		Issues []v2Issue `json:"issues"`
@@ -211,6 +216,11 @@ func (xs *XrayService) GetSummaryV2(paths, labels []string) (SeverityCounts, []S
 				if existing.JFrogSeverity == "" && issue.ExtendedInformation != nil {
 					existing.JFrogSeverity = issue.ExtendedInformation.JFrogResearchSeverity
 				}
+				for _, cve := range issue.Cves {
+					if cve.CVE != "" && !slices.Contains(existing.CVEIDs, cve.CVE) {
+						existing.CVEIDs = append(existing.CVEIDs, cve.CVE)
+					}
+				}
 				continue
 			}
 			si := &SummaryIssue{
@@ -229,6 +239,11 @@ func (xs *XrayService) GetSummaryV2(paths, labels []string) (SeverityCounts, []S
 			if label != "" {
 				si.Platforms = []string{label}
 			}
+			for _, cve := range issue.Cves {
+				if cve.CVE != "" {
+					si.CVEIDs = append(si.CVEIDs, cve.CVE)
+				}
+			}
 			seen[issue.IssueID] = si
 		}
 	}
@@ -237,6 +252,7 @@ func (xs *XrayService) GetSummaryV2(paths, labels []string) (SeverityCounts, []S
 	issues := make([]SummaryIssue, 0, len(seen))
 	for _, si := range seen {
 		sort.Strings(si.Platforms)
+		sort.Strings(si.CVEIDs)
 		issues = append(issues, *si)
 		switch si.Severity {
 		case "Critical":

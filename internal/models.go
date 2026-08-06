@@ -141,6 +141,7 @@ type EnhancedFinding struct {
 	IssueID       string   `json:"issueId"`
 	Severity      string   `json:"severity"`
 	JFrogSeverity string   `json:"jfrogSeverity,omitempty"`
+	CVEIDs        []string `json:"cveIds,omitempty"`
 	Fixable       bool     `json:"fixable"`
 	Malicious     bool     `json:"malicious"`
 	Platforms     []string `json:"platforms,omitempty"`
