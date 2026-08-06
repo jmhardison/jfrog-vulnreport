@@ -349,7 +349,7 @@ func endToEndMockServer(t *testing.T) *httptest.Server {
 		case strings.Contains(r.URL.Path, "v1/violations"):
 			_, _ = io.WriteString(w, `{"total_violations":1,"violations":[{"violation_id":"V-001","issue_id":"XRAY-MAL-1","severity":"Critical","malicious_package":true}]}`)
 		case strings.Contains(r.URL.Path, "v2/summary/artifact"):
-			_, _ = io.WriteString(w, `{"artifacts":[{"issues":[{"issue_id":"XRAY-MAL-1","severity":"Critical","extended_information":{"jfrog_research_severity":"Critical"},"components":[{"fixed_versions":[]}]},{"issue_id":"XRAY-CVE-1","severity":"High","extended_information":{"jfrog_research_severity":"Medium"},"components":[{"fixed_versions":["2.0.0"]}]}]}]}`)
+			_, _ = io.WriteString(w, `{"artifacts":[{"issues":[{"issue_id":"XRAY-MAL-1","severity":"Critical","extended_information":{"jfrog_research_severity":"Critical"},"components":[{"fixed_versions":[]}]},{"issue_id":"XRAY-CVE-1","severity":"High","cves":[{"cve":"CVE-2024-99999"}],"extended_information":{"jfrog_research_severity":"Medium"},"components":[{"fixed_versions":["2.0.0"]}]}]}]}`)
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -412,12 +412,15 @@ func TestRunCheckCommandPipeline_JSONOutput(t *testing.T) {
 	assert.Equal(t, "Critical", report.Findings[0].JFrogSeverity)
 	assert.True(t, report.Findings[0].Malicious)
 	assert.False(t, report.Findings[0].Fixable)
-	// High+fixable; JFrog research rates it Medium.
+	// High+fixable; JFrog research rates it Medium; has CVE ID.
 	assert.Equal(t, "XRAY-CVE-1", report.Findings[1].IssueID)
 	assert.Equal(t, "High", report.Findings[1].Severity)
 	assert.Equal(t, "Medium", report.Findings[1].JFrogSeverity)
+	assert.Equal(t, []string{"CVE-2024-99999"}, report.Findings[1].CVEIDs)
 	assert.False(t, report.Findings[1].Malicious)
 	assert.True(t, report.Findings[1].Fixable)
+	// Malicious finding has no CVE ID.
+	assert.Empty(t, report.Findings[0].CVEIDs)
 }
 
 func TestRunCheckCommandPipeline_GithubMDOutput(t *testing.T) {
@@ -456,8 +459,10 @@ func TestRunCheckCommandPipeline_GithubMDOutput(t *testing.T) {
 	assert.Contains(t, out, "Malicious Findings (1)")
 	assert.Contains(t, out, "XRAY-MAL-1")
 
-	// Security findings table with fixable count and both findings.
+	// Security findings table with fixable count, CVE ID column, and both findings.
 	assert.Contains(t, out, "1 fixable")
+	assert.Contains(t, out, "CVE ID")
+	assert.Contains(t, out, "CVE-2024-99999")
 	assert.Contains(t, out, "XRAY-CVE-1")
 
 	// No log-line leakage (github-md sets log level to ERROR).
@@ -844,11 +849,17 @@ func TestOutputMarkdownReport_MaliciousFindingsTable(t *testing.T) {
 		ImageName:       "docker-local/app:v1",
 		GeneratedAt:     "2026-01-01T00:00:00Z",
 		MaliciousIssues: []string{"XRAY-A", "XRAY-B"},
+		SummaryIssues: []SummaryIssue{
+			{IssueID: "XRAY-A", Severity: "Critical", CVEIDs: []string{"CVE-2024-00001"}},
+			{IssueID: "XRAY-B", Severity: "Critical"},
+		},
 	}
 	var buf bytes.Buffer
 	require.NoError(t, outputMarkdownReport(&buf, report, map[string]bool{"XRAY-A": true, "XRAY-B": true}, "", "", false, "vulnreport", "vtest"))
 	out := buf.String()
 	assert.Contains(t, out, "Malicious Findings (2)")
+	assert.Contains(t, out, "CVE ID")
+	assert.Contains(t, out, "CVE-2024-00001")
 	assert.Contains(t, out, "XRAY-A")
 	assert.Contains(t, out, "XRAY-B")
 }
@@ -940,7 +951,7 @@ func TestOutputTableReport_WithFindings(t *testing.T) {
 		HighCount:     1,
 		Platforms:     []PlatformVulnerabilityInfo{{Platform: Platform{OS: "linux", Architecture: "amd64"}}},
 		SummaryIssues: []SummaryIssue{
-			{IssueID: "XRAY-999", Severity: "Critical", Fixable: true, Platforms: []string{"linux/amd64"}},
+			{IssueID: "XRAY-999", Severity: "Critical", Fixable: true, Platforms: []string{"linux/amd64"}, CVEIDs: []string{"CVE-2024-11111"}},
 			{IssueID: "XRAY-888", Severity: "High", Fixable: false, Platforms: []string{"linux/amd64"}},
 		},
 	}
@@ -949,10 +960,30 @@ func TestOutputTableReport_WithFindings(t *testing.T) {
 	out := buf.String()
 	assert.Contains(t, out, "CRITICAL CVEs PRESENT")
 	assert.Contains(t, out, "Security Findings (2 | 1 fixable)")
+	assert.Contains(t, out, "CVE ID")
+	assert.Contains(t, out, "CVE-2024-11111")
 	assert.Contains(t, out, "XRAY-999")
 	assert.Contains(t, out, "XRAY-888")
 	assert.Contains(t, out, "Critical")
 	assert.Contains(t, out, "High")
+}
+
+func TestOutputTableReport_CVEIDAbsent(t *testing.T) {
+	report := &VulnerabilityReport{
+		ImageName:   "docker-local/app:v1",
+		GeneratedAt: "2026-01-01T00:00:00Z",
+		TotalIssues: 1,
+		HighCount:   1,
+		Platforms:   []PlatformVulnerabilityInfo{{Platform: Platform{OS: "linux", Architecture: "amd64"}}},
+		SummaryIssues: []SummaryIssue{
+			{IssueID: "XRAY-777", Severity: "High", Fixable: false, Platforms: []string{"linux/amd64"}},
+		},
+	}
+	var buf bytes.Buffer
+	require.NoError(t, outputTableReport(&buf, report, map[string]bool{}, "", "", false, "vulnreport", "vtest"))
+	out := buf.String()
+	assert.Contains(t, out, "CVE ID")
+	assert.Contains(t, out, "-") // dash shown when no CVE ID
 }
 
 func TestOutputTableReport_Malicious(t *testing.T) {
@@ -964,7 +995,7 @@ func TestOutputTableReport_Malicious(t *testing.T) {
 		MaliciousIssues: []string{"XRAY-666"},
 		Platforms:       []PlatformVulnerabilityInfo{{Platform: Platform{OS: "linux", Architecture: "amd64"}}},
 		SummaryIssues: []SummaryIssue{
-			{IssueID: "XRAY-666", Severity: "Critical", Fixable: false, Platforms: []string{"linux/amd64"}},
+			{IssueID: "XRAY-666", Severity: "Critical", Fixable: false, Platforms: []string{"linux/amd64"}, CVEIDs: []string{"CVE-2024-66666"}},
 		},
 	}
 	lookup := map[string]bool{"XRAY-666": true}
@@ -973,6 +1004,8 @@ func TestOutputTableReport_Malicious(t *testing.T) {
 	out := buf.String()
 	assert.Contains(t, out, "MALICIOUS EXPLOIT PRESENT")
 	assert.Contains(t, out, "Malicious Findings (1)")
+	assert.Contains(t, out, "CVE ID")
+	assert.Contains(t, out, "CVE-2024-66666")
 	assert.Contains(t, out, "XRAY-666")
 	assert.Contains(t, out, "Security Findings")
 }
