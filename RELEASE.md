@@ -1,5 +1,10 @@
 # Release Notes
 
+## v1.0.2
+
+- feat: add cve id output (#12)
+
+
 ## v1.0.1
 
 - fix: go fmt (#11)

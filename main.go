@@ -8,7 +8,7 @@ import (
 
 const (
 	appName    = "vulnreport"
-	appVersion = "v1.0.1"
+	appVersion = "v1.0.2"
 )
 
 func main() {
