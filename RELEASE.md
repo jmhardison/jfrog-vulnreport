@@ -1,5 +1,10 @@
 # Release Notes
 
+## v1.0.4
+
+- build(deps): bump github.com/go-git/go-git/v5 from 5.19.1 to 5.19.2 (#13)
+
+
 ## v1.0.3
 
 - build(deps): bump github.com/stretchr/testify from 1.11.1 to 1.12.1 (#14)
