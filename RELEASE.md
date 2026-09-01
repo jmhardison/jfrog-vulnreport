@@ -1,5 +1,10 @@
 # Release Notes
 
+## v1.0.3
+
+- build(deps): bump github.com/stretchr/testify from 1.11.1 to 1.12.1 (#14)
+
+
 ## v1.0.2
 
 - feat: add cve id output (#12)
