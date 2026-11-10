@@ -1,5 +1,10 @@
 # Release Notes
 
+## v1.0.5
+
+- build(deps): bump golang.org/x/term from 0.45.0 to 0.47.0 (#16)
+
+
 ## v1.0.4
 
 - build(deps): bump github.com/go-git/go-git/v5 from 5.19.1 to 5.19.2 (#13)
