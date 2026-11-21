@@ -3,7 +3,7 @@ module github.com/jmhardison/jfrog-vulnreport
 go 1.26.0
 
 require (
-	github.com/jedib0t/go-pretty/v6 v6.8.3
+	github.com/jedib0t/go-pretty/v6 v6.9.2
 	github.com/jfrog/jfrog-cli-core/v2 v2.60.0
 	github.com/jfrog/jfrog-client-go v1.55.0
 	github.com/stretchr/testify v1.12.1
